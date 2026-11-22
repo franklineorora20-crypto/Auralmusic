@@ -51,13 +51,24 @@ export function clampOffset(value: number | undefined): number {
   return Math.floor(value);
 }
 
+const HERITAGE_ACCENTS = [
+  "#8a633b",
+  "#2d5241",
+  "#7a313c",
+  "#2f4562",
+  "#5c6142",
+  "#8b4e3c",
+  "#5e4c3e",
+  "#4c5c50",
+];
+
 /** Deterministic accent colour derived from an id, for artwork fallbacks. */
 export function accentFor(seed: string, offset = 0): string {
   let hash = 0;
   for (let index = 0; index < seed.length; index += 1) {
     hash = (hash * 31 + seed.charCodeAt(index)) % 360;
   }
-  return `hsl(${(hash + offset) % 360} 58% 58%)`;
+  return HERITAGE_ACCENTS[Math.abs(hash + offset) % HERITAGE_ACCENTS.length];
 }
 
 /** How many tracks a provider should return when a caller does not say. */

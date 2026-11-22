@@ -56,7 +56,7 @@ function mapAudiusTrack(track: AudiusTrack): Track | null {
       streamingAllowed: true,
       downloadAllowed: downloadable,
     },
-    accent: "#8fe9a3",
+    accent: "#5b7c65",
     ...(downloadable ? {
       downloadUrl: `${AUDIUS_API}/tracks/${encodeURIComponent(track.id)}/download?app_name=${AUDIUS_APP_NAME}`,
     } : {}),
@@ -88,7 +88,7 @@ function mapJamendoTrack(track: JamendoTrack): Track | null {
       streamingAllowed: true,
       downloadAllowed: downloadable,
     },
-    accent: "#8fb8ef",
+    accent: "#4d6480",
     ...(downloadable ? { downloadUrl: track.audiodownload } : {}),
   };
 }

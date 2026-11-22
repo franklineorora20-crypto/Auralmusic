@@ -10,6 +10,7 @@
  */
 import { useEffect, useMemo, useRef } from "react";
 import "./CRTWarp.css";
+import { detectSoftwareRenderer } from "./ferrofluidConfig";
 
 const ROOT = "crt-warp-container";
 const CANVAS = "crt-warp-canvas";
@@ -36,6 +37,8 @@ uniform float uLevels;
 uniform float uDecay;
 uniform float uReveal;
 uniform float uRise;
+uniform float uContour;
+uniform float uEnergy;
 uniform vec4 uSeed;
 uniform sampler2D uPrevious;
 out vec4 outColor;
@@ -43,26 +46,26 @@ out vec4 outColor;
 float field(vec2 uv, float t) {
   uv = (uv - 0.5) * uFrequency + 0.5;
   float f = 0.0;
-  f += 0.7 * sin(0.5 * uv.x + t / 5.0 + uSeed.x);
-  f += 3.0 * sin(1.6 * uv.y + t / 5.0 + uSeed.y);
-  f += sin(10.0 * (uv.y * sin(t / 2.0 + uSeed.z) + uv.x * cos(t / 5.0)) + t / 2.0);
-  float cx = uv.x + 0.5 * sin(t / 2.0 + uSeed.w);
-  float cy = uv.y + 0.5 * cos(t / 4.0 + uSeed.x * 0.7);
-  f += 0.4 * sin(sqrt(100.0 * cx * cx + 100.0 * cy * cy + 1.0) + t);
-  f += 0.9 * sin(sqrt(75.0 * cx * cx + 25.0 * cy * cy + 1.0) + t);
-  f -= 1.4 * sin(sqrt(256.0 * cx * cx + 25.0 * cy * cy + 1.0) + t);
-  f += 0.3 * sin(0.5 * uv.y + uv.x + sin(t));
+  f += 0.72 * sin(0.5 * uv.x + t / 5.0 + uSeed.x);
+  f += 2.85 * sin(1.55 * uv.y + t / 5.2 + uSeed.y);
+  f += sin(9.5 * (uv.y * sin(t / 2.2 + uSeed.z) + uv.x * cos(t / 5.0)) + t / 2.1);
+  float cx = uv.x + 0.45 * sin(t / 2.2 + uSeed.w);
+  float cy = uv.y + 0.45 * cos(t / 4.0 + uSeed.x * 0.7);
+  f += 0.45 * sin(sqrt(92.0 * cx * cx + 92.0 * cy * cy + 1.0) + t);
+  f += 0.85 * sin(sqrt(68.0 * cx * cx + 26.0 * cy * cy + 1.0) + t * 0.92);
+  f -= 1.25 * sin(sqrt(220.0 * cx * cx + 220.0 * cy * cy + 1.0) + t * 0.88);
+  f += 0.35 * sin(0.6 * uv.y + uv.x + sin(t * 0.75));
   return f;
 }
 
 void main() {
   vec2 cell = floor(gl_FragCoord.xy);
   vec2 uv = (cell + 0.5) / uGrid;
-  float s = (0.5 + 0.499 * sin(field(uv, uTime) * uAmplitude)) * mix(1.0 / uLevels, 1.0, uReveal);
-  float level = floor(s * uLevels) / max(uLevels - 1.0, 1.0);
+  float amp = uAmplitude * mix(0.84, 1.14, uEnergy);
+  float level = (0.5 + 0.495 * sin(field(uv, uTime) * amp)) * mix(0.25, 1.0, uReveal);
   float previous = texelFetch(uPrevious, ivec2(cell), 0).r;
   float lifted = min(level, previous + uRise);
-  outColor = vec4(max(lifted, previous * uDecay - 0.004), level, 0.0, 1.0);
+  outColor = vec4(max(lifted, previous * uDecay - 0.002), level, 0.0, 1.0);
 }`;
 
 const GLOW = `#version 300 es
@@ -73,7 +76,7 @@ out vec4 outColor;
 
 void main() {
   float v = texture(uContent, gl_FragCoord.xy / uSize).r;
-  outColor = vec4(v * v, 0.0, 0.0, 1.0);
+  outColor = vec4(pow(v, 2.4) * 0.75, 0.0, 0.0, 1.0);
 }`;
 
 const BLUR = `#version 300 es
@@ -129,6 +132,9 @@ uniform float uStatic;
 uniform float uRoll;
 uniform float uTear;
 uniform float uGain;
+uniform float uLevels;
+uniform float uContour;
+uniform float uEnergy;
 uniform vec4 uMagnet;
 uniform float uPurity;
 out vec4 outColor;
@@ -150,13 +156,20 @@ vec2 curve(vec2 uv) {
 
 float lineValue(float x, float y) {
   if (x < 0.0 || x > 1.0 || y < 0.0 || y > 1.0) return 0.0;
-  float cx = x * uGrid.x - 0.5;
-  float c0 = floor(cx);
-  int row = int(clamp(floor(y * uGrid.y), 0.0, uGrid.y - 1.0));
-  float a = texelFetch(uContent, ivec2(int(clamp(c0, 0.0, uGrid.x - 1.0)), row), 0).r;
-  float b = texelFetch(uContent, ivec2(int(clamp(c0 + 1.0, 0.0, uGrid.x - 1.0)), row), 0).r;
-  float soft = mix(0.5, 0.14, uFocus);
-  return pow(mix(a, b, smoothstep(0.5 - soft, 0.5 + soft, cx - c0)), 1.25);
+  vec2 coord = vec2(x, y) * uGrid - 0.5;
+  vec2 f = fract(coord);
+  vec2 w = f * f * (3.0 - 2.0 * f);
+  vec2 smoothUv = (floor(coord) + 0.5 + w) / uGrid;
+  float val = texture(uContent, clamp(smoothUv, 0.0, 1.0)).r;
+  float bands = max(uLevels - 1.0, 1.0);
+  float phase = val * bands;
+  float distToLine = abs(fract(phase) - 0.5);
+  float fw = max(fwidth(phase), 0.018);
+  float lineWidth = mix(0.055, 0.085, uEnergy);
+  float filament = 1.0 - smoothstep(0.0, lineWidth + fw * 1.35, distToLine);
+  float secondary = exp(-pow(distToLine * 5.2, 2.0)) * 0.28;
+  float plateau = pow(val, 2.2) * mix(0.18, 0.34, uEnergy);
+  return clamp(plateau + (filament + secondary) * uContour * mix(0.62, 1.0, uEnergy), 0.0, 1.0);
 }
 
 float beam(vec2 uv) {
@@ -166,36 +179,39 @@ float beam(vec2 uv) {
   float a = lineValue(uv.x, (r0 + 0.5) / uLines);
   float b = lineValue(uv.x, (r0 + 1.5) / uLines);
   float nearest = f < 0.5 ? a : b;
-  float sa = mix(0.16, 0.34, sqrt(a));
-  float sb = mix(0.16, 0.34, sqrt(b));
+  float sa = mix(0.26, 0.42, sqrt(a));
+  float sb = mix(0.26, 0.42, sqrt(b));
   float lit = a * exp(-0.5 * f * f / (sa * sa)) + b * exp(-0.5 * (1.0 - f) * (1.0 - f) / (sb * sb));
-  return mix(nearest, lit * 1.18, uScanline * mix(0.3, 1.0, uFocus));
+  return mix(nearest, lit * 1.12, uScanline * mix(0.35, 1.0, uFocus));
 }
 
 vec3 maskAt(vec2 px) {
   if (uMaskType == 0 || uMask <= 0.0) return vec3(1.0);
   float size = max(1.0, floor(uPixel + 0.5));
   vec2 q = floor(px / size);
-  float low = 1.0 - uMask;
-  vec3 m = vec3(low);
-  float column = q.x;
-  if (uMaskType == 2) column += mod(floor(q.y / 2.0), 2.0) * 1.5;
-  int stripe = int(mod(floor(column), 3.0));
-  if (stripe == 0) m.r = 1.0;
-  else if (stripe == 1) m.g = 1.0;
-  else m.b = 1.0;
-  if (uMaskType == 2 && mod(q.y, 2.0) > 0.5) m *= mix(1.0, 0.72, uMask);
+  float cell = mod(floor(q.x), 3.0);
+  if (uMaskType == 2) cell = mod(floor(q.x + mod(floor(q.y * 0.5), 2.0) * 1.5), 3.0);
+  float grille = cell < 0.5 ? 1.0 : (cell < 1.5 ? 0.88 : 0.76);
   if (uMaskType == 3) {
     float slot = mod(q.y + mod(floor(q.x / 3.0), 2.0) * 2.0, 4.0);
-    if (slot < 1.0) m *= mix(1.0, 0.45, uMask);
+    if (slot < 1.0) grille *= 0.68;
   }
-  return m / sqrt((1.0 + 2.0 * low) / 3.0);
+  float luma = mix(1.0, grille, uMask);
+  vec3 tint = vec3(1.0);
+  if (uShift > 0.0002) {
+    tint = cell < 0.5 ? vec3(1.03, 0.99, 0.94) : (cell < 1.5 ? vec3(1.0, 1.0, 0.98) : vec3(0.95, 0.97, 1.02));
+    tint = mix(vec3(1.0), tint, clamp(uMask * 0.8, 0.0, 1.0));
+  }
+  return tint * luma;
 }
 
 vec3 phosphor(vec3 cov) {
-  float peak = max(max(uColor.r, uColor.g), max(uColor.b, 0.001));
-  vec3 weight = 1.0 - uColor / peak;
-  return uColor * cov * pow(max(cov, vec3(0.0001)), 0.7 * weight);
+  float peak = max(max(cov.r, cov.g), cov.b);
+  vec3 deepTone = uColor * 0.65;
+  vec3 hotCore = mix(uColor, vec3(1.0, 0.96, 0.87), 0.72);
+  vec3 warmRamp = mix(deepTone, uColor, smoothstep(0.08, 0.62, peak));
+  warmRamp = mix(warmRamp, hotCore, smoothstep(0.62, 1.0, peak));
+  return warmRamp * cov;
 }
 
 void main() {
@@ -203,6 +219,7 @@ void main() {
   float aspect = uResolution.x / uResolution.y;
   vec2 uv = curve(frag);
   float shape = 1.0;
+  float bezelRim = 0.0;
   if (uCorners > 0.0) {
     float margin = uCorners * 0.035;
     float radius = uCorners * 0.1;
@@ -212,6 +229,7 @@ void main() {
     float sd = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
     float aa = max(fwidth(sd), 0.0005);
     shape = (1.0 - smoothstep(-aa, aa, sd)) * mix(1.0, smoothstep(0.0, 0.06, -sd), 0.35);
+    bezelRim = smoothstep(0.055, 0.006, -sd) * smoothstep(0.0, 0.008, -sd) * (0.3 + 0.7 * clamp(1.0 - frag.y, 0.0, 1.0));
     uv = (uv - 0.5) / (1.0 - 2.0 * margin) + 0.5;
   }
   float rolling = step(0.0001, abs(uRoll));
@@ -225,7 +243,7 @@ void main() {
   float line = floor(uv.y * uLines);
   float tick = floor(uTime * 30.0);
   uv.x += uTear * (sin(uv.y * 21.0 + uTime * 37.0) * 0.6 + hash(vec2(line, tick)) - 0.5) * 0.05;
-  uv.x += uInterference * 0.003 * (hash(vec2(line * 0.37, floor(uTime * 24.0))) - 0.5);
+  uv.x += uInterference * 0.0022 * (hash(vec2(line * 0.37, floor(uTime * 24.0))) - 0.5);
 
   vec2 dp = (frag - uMagnet.xy) * vec2(aspect, 1.0);
   float fall = exp(-dot(dp, dp) / max(uMagnet.w * uMagnet.w, 0.0001));
@@ -246,8 +264,8 @@ void main() {
   level *= 1.0 + uPurity * fall * uMagnet.z * 0.9 * purity;
 
   float glow = texture(uGlow, uv).r * uBloom;
-  float hum = 1.0 - uInterference * 0.24 * smoothstep(0.2, 1.0, 0.5 + 0.5 * sin((frag.y - uTime * 0.09) * 6.2831853));
-  float flick = 1.0 + uFlicker * 0.1 * (hash(vec2(floor(uTime * 60.0), 7.3)) - 0.5);
+  float hum = 1.0 - uInterference * 0.2 * smoothstep(0.2, 1.0, 0.5 + 0.5 * sin((frag.y - uTime * 0.09) * 6.2831853));
+  float flick = 1.0 + uFlicker * 0.08 * (hash(vec2(floor(uTime * 60.0), 7.3)) - 0.5);
   float grain = hash(gl_FragCoord.xy + fract(uTime) * 173.0) - 0.5;
   vec2 v = frag - 0.5;
   float vignette = mix(1.0, smoothstep(0.0, 1.0, clamp(1.0 - dot(v, v) * 2.0, 0.0, 1.0)), uVignette);
@@ -257,19 +275,19 @@ void main() {
   level = mix(level, vec3(noise * noise * 1.15), uStatic);
   level *= gain * (1.0 + grain * uNoise * 2.0);
   level *= maskAt(gl_FragCoord.xy);
-  glow *= gain * shape * (1.0 + 0.6 * (1.0 - uFocus));
+  glow *= gain * shape * (1.0 + 0.55 * (1.0 - uFocus));
   level *= shape;
 
   vec3 color;
   float alpha;
   if (uLight < 0.5) {
     vec3 cov = clamp(level, 0.0, 1.0);
-    vec3 light = phosphor(cov) + uColor * glow * 0.5 * (1.0 - cov);
-    vec3 excess = max(level - 1.1, 0.0);
-    light += (1.0 - light) * (1.0 - exp(-excess * 0.6));
+    vec3 light = phosphor(cov) + uColor * glow * 0.48 * (1.0 - cov * 0.65) + uColor * bezelRim * 0.14 * shape;
+    vec3 excess = max(level - 1.05, 0.0);
+    light += (vec3(1.0, 0.96, 0.87) - light) * (1.0 - exp(-excess * 0.65));
     light = clamp(light, 0.0, 1.0);
     color = uBackground + light * (1.0 - uBackground);
-    alpha = max(max(light.r, light.g), light.b);
+    alpha = clamp(max(max(light.r, light.g), light.b), 0.0, 1.0);
     if (uOpaque < 0.5) color = light;
   } else {
     vec3 cov = clamp(level * 0.86, 0.0, 0.88);
@@ -389,6 +407,8 @@ export type CRTWarpProps = {
   backgroundColor?: string;
   lightMode?: boolean;
   speed?: number;
+  energy?: number;
+  contour?: number;
   variation?: number;
   waveAmplitude?: number;
   waveFrequency?: number;
@@ -422,49 +442,53 @@ export type CRTWarpProps = {
 };
 
 export default function CRTWarp({
-  color = "#c755f7",
-  backgroundColor = "#120f17",
+  color = "#d4af72",
+  backgroundColor = "#141210",
   lightMode = false,
-  speed = 0.5,
+  speed = 0.44,
+  energy = 0.55,
+  contour = 0.6,
   variation = 0,
-  waveAmplitude = 0.3,
-  waveFrequency = 2.5,
-  levels = 3,
-  columns = 80,
-  persistence = 0.4,
-  curvature = 0.25,
-  corners = 0,
-  scanlineStrength = 0.6,
+  waveAmplitude = 0.24,
+  waveFrequency = 2.3,
+  levels = 7,
+  columns = 152,
+  persistence = 0.42,
+  curvature = 0.14,
+  corners = 0.04,
+  scanlineStrength = 0.32,
   scanlineFrequency = 200,
   mask = "aperture",
-  maskStrength = 0.3,
-  bloom = 1.5,
-  bloomRadius = 1,
-  rgbShift = 0.003,
-  noise = 0.1,
-  flicker = 0.15,
-  interference = 0.2,
-  vignette = 0.3,
-  brightness = 1,
+  maskStrength = 0.14,
+  bloom = 1.55,
+  bloomRadius = 1.4,
+  rgbShift = 0.0006,
+  noise = 0.035,
+  flicker = 0.04,
+  interference = 0.05,
+  vignette = 0.38,
+  brightness = 1.0,
   intro = true,
   mouseReact = false,
   mouseStrength = 0.5,
   changeOnClick = false,
-  dpr = 2,
-  fps = 60,
+  dpr = 1.5,
+  fps = 45,
   paused = false,
   className = "",
   style,
 }: CRTWarpProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const ink = useMemo(() => parseColor(color, [0.78, 0.33, 0.97]) ?? [0.78, 0.33, 0.97], [color]);
-  const paper = useMemo(() => parseColor(backgroundColor, [0.07, 0.06, 0.09]), [backgroundColor]);
+  const ink = useMemo(() => parseColor(color, [0.83, 0.69, 0.45]) ?? [0.83, 0.69, 0.45], [color]);
+  const paper = useMemo(() => parseColor(backgroundColor, [0.08, 0.07, 0.06]), [backgroundColor]);
 
   const settings = {
     ink,
     paper,
     lightMode,
     speed,
+    energy: clamp(energy, 0, 1),
+    contour: clamp(contour, 0, 1),
     variation,
     amplitude: Math.max(0, waveAmplitude) / 0.28,
     frequency: Math.max(0.01, waveFrequency) / 2.2,
@@ -518,7 +542,7 @@ export default function CRTWarp({
     }
 
     const content = createProgram(gl, CONTENT, [
-      "uGrid", "uTime", "uAmplitude", "uFrequency", "uLevels", "uDecay", "uReveal", "uRise", "uSeed", "uPrevious",
+      "uGrid", "uTime", "uAmplitude", "uFrequency", "uLevels", "uDecay", "uReveal", "uRise", "uContour", "uEnergy", "uSeed", "uPrevious",
     ]);
     const glowSource = createProgram(gl, GLOW, ["uContent", "uSize"]);
     const blur = createProgram(gl, BLUR, ["uSource", "uSize", "uDirection", "uSigma"]);
@@ -526,7 +550,7 @@ export default function CRTWarp({
       "uContent", "uGlow", "uGrid", "uResolution", "uPixel", "uTime", "uColor", "uBackground",
       "uOpaque", "uLight", "uLines", "uScanline", "uCurve", "uCorners", "uMaskType", "uMask",
       "uBloom", "uBrightness", "uNoise", "uFlicker", "uInterference", "uVignette", "uShift",
-      "uWarm", "uFocus", "uStatic", "uRoll", "uTear", "uGain", "uMagnet", "uPurity",
+      "uWarm", "uFocus", "uStatic", "uRoll", "uTear", "uGain", "uLevels", "uContour", "uEnergy", "uMagnet", "uPurity",
     ]);
     if (!content || !glowSource || !blur || !display) {
       container.classList.add("crt-warp-fallback");
@@ -542,13 +566,25 @@ export default function CRTWarp({
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
+    const debugRenderer = gl.getExtension("WEBGL_debug_renderer_info");
+    const rendererName = debugRenderer
+      ? String(gl.getParameter(debugRenderer.UNMASKED_RENDERER_WEBGL) ?? "")
+      : String(gl.getParameter(gl.RENDERER) ?? "");
+    const isSoftwareRenderer = detectSoftwareRenderer(rendererName);
+
+    const initS = settingsRef.current;
     const state = {
       width: 1, height: 1, pixel: 1, grid: [0, 0],
       cells: [] as (WarpTarget | null)[], glows: [] as (WarpTarget | null)[],
-      flip: 0, time: 0, clock: 0, last: 0, frame: 0, raf: 0,
+      flip: 0, time: 0, clock: 0, last: 0, frame: 0, raf: 0, timer: 0,
       visible: false, introAt: -1, flipAt: -1, flipped: true, channel: 0,
       pointer: [0.5, 0.5], magnet: [0.5, 0.5, 0, 0, 0], magnetGoal: 0,
       lost: false, quiet: 0, seen: null as unknown,
+      smoothSpeed: initS.speed,
+      smoothEnergy: initS.energy,
+      smoothBrightness: initS.brightness,
+      smoothBloom: initS.bloom,
+      smoothInk: [...initS.ink] as [number, number, number],
     };
 
     const ensureTargets = () => {
@@ -571,7 +607,8 @@ export default function CRTWarp({
 
     const resize = () => {
       const s = settingsRef.current;
-      const ratio = Math.min(window.devicePixelRatio || 1, s.dpr);
+      const baseRatio = Math.min(window.devicePixelRatio || 1, s.dpr);
+      const ratio = isSoftwareRenderer ? Math.min(baseRatio, 0.5) : baseRatio;
       const width = Math.max(1, Math.round(container.clientWidth * ratio));
       const height = Math.max(1, Math.round(container.clientHeight * ratio));
       state.pixel = ratio;
@@ -616,6 +653,8 @@ export default function CRTWarp({
       gl.uniform1f(content.uniforms.uDecay, reduced ? 0 : s.persistence ** (dt * 60));
       gl.uniform1f(content.uniforms.uReveal, reveal);
       gl.uniform1f(content.uniforms.uRise, reveal < 1 ? dt / 0.22 : 1);
+      gl.uniform1f(content.uniforms.uContour, s.contour);
+      gl.uniform1f(content.uniforms.uEnergy, state.smoothEnergy);
       gl.uniform4f(content.uniforms.uSeed, seed[0], seed[1], seed[2], seed[3]);
       bindTexture(0, previous.texture, content.uniforms.uPrevious);
       draw(next, cols, rows);
@@ -665,7 +704,7 @@ export default function CRTWarp({
       gl.uniform2f(u.uResolution, state.width, state.height);
       gl.uniform1f(u.uPixel, state.pixel);
       gl.uniform1f(u.uTime, reduced ? 0 : state.clock);
-      gl.uniform3f(u.uColor, s.ink[0], s.ink[1], s.ink[2]);
+      gl.uniform3f(u.uColor, state.smoothInk[0], state.smoothInk[1], state.smoothInk[2]);
       const paperColor = s.paper ?? [0, 0, 0];
       gl.uniform3f(u.uBackground, paperColor[0], paperColor[1], paperColor[2]);
       gl.uniform1f(u.uOpaque, s.paper ? 1 : 0);
@@ -676,8 +715,8 @@ export default function CRTWarp({
       gl.uniform1f(u.uCorners, s.corners);
       gl.uniform1i(u.uMaskType, s.mask);
       gl.uniform1f(u.uMask, s.maskStrength);
-      gl.uniform1f(u.uBloom, s.bloom);
-      gl.uniform1f(u.uBrightness, s.brightness);
+      gl.uniform1f(u.uBloom, state.smoothBloom);
+      gl.uniform1f(u.uBrightness, state.smoothBrightness);
       gl.uniform1f(u.uNoise, s.noise);
       gl.uniform1f(u.uFlicker, reduced ? 0 : s.flicker);
       gl.uniform1f(u.uInterference, s.interference);
@@ -689,26 +728,54 @@ export default function CRTWarp({
       gl.uniform1f(u.uRoll, roll);
       gl.uniform1f(u.uTear, tear);
       gl.uniform1f(u.uGain, gain);
+      gl.uniform1f(u.uLevels, s.levels);
+      gl.uniform1f(u.uContour, s.contour);
+      gl.uniform1f(u.uEnergy, state.smoothEnergy);
       gl.uniform4f(u.uMagnet, state.magnet[0], 1 - state.magnet[1], state.magnet[4] * s.mouseStrength * 2, 0.24);
       gl.uniform1f(u.uPurity, s.mask > 0 ? 1 : 0);
       draw(null, state.width, state.height);
     };
 
+    const scheduleNext = (delayMs = 0) => {
+      if (state.raf || state.timer || state.lost) return;
+      if (delayMs > 16) {
+        state.timer = window.setTimeout(() => {
+          state.timer = 0;
+          if (!state.lost && !state.raf) state.raf = requestAnimationFrame(tick);
+        }, delayMs);
+      } else {
+        state.raf = requestAnimationFrame(tick);
+      }
+    };
+
     const tick = (now: number) => {
-      state.raf = requestAnimationFrame(tick);
-      if (!state.visible || document.hidden || state.lost) {
+      state.raf = 0;
+      if (state.lost) return;
+      if (!state.visible || document.hidden) {
         state.last = now;
+        scheduleNext(isSoftwareRenderer ? 120 : 0);
         return;
       }
       const s = settingsRef.current;
-      const interval = 1000 / s.fps;
-      if (state.last && now - state.last < interval - 1) return;
-      const dt = state.last ? Math.min((now - state.last) / 1000, 0.1) : 1 / 60;
+      const effectiveFps = isSoftwareRenderer ? Math.min(s.fps, 12) : s.fps;
+      const interval = 1000 / effectiveFps;
+      if (state.last && now - state.last < interval - 1) {
+        scheduleNext(interval - (now - state.last));
+        return;
+      }
+      const dt = state.last ? Math.min((now - state.last) / 1000, 0.16) : 1 / effectiveFps;
       state.last = now;
       const reduced = prefersReduced();
+      const lerp = 1 - Math.exp(-dt / 0.35);
+      state.smoothSpeed += (s.speed - state.smoothSpeed) * lerp;
+      state.smoothEnergy += (s.energy - state.smoothEnergy) * lerp;
+      state.smoothBrightness += (s.brightness - state.smoothBrightness) * lerp;
+      state.smoothBloom += (s.bloom - state.smoothBloom) * lerp;
+      for (let i = 0; i < 3; i++) state.smoothInk[i] += (s.ink[i] - state.smoothInk[i]) * lerp;
+
       state.clock += dt;
       if (state.introAt < 0) state.introAt = state.clock;
-      if (!s.paused && !reduced) state.time += dt * s.speed;
+      if (!s.paused && !reduced) state.time += dt * state.smoothSpeed;
 
       const m = state.magnet;
       const omega = TAU / 0.3;
@@ -729,10 +796,15 @@ export default function CRTWarp({
       if (state.seen !== s || transient || !still) state.quiet = 0;
       else state.quiet += 1;
       state.seen = s;
-      if (state.quiet > 90) return;
+      if (state.quiet > 90) {
+        scheduleNext(isSoftwareRenderer ? 120 : 0);
+        return;
+      }
 
       resize();
       render(dt, reduced);
+      const elapsed = performance.now() - now;
+      scheduleNext(Math.max(0, interval - elapsed));
     };
 
     // Aural: no pointer handlers at all — the canvas is purely decorative and
@@ -753,10 +825,11 @@ export default function CRTWarp({
     sizes.observe(container);
     resize();
     canvas.addEventListener("webglcontextlost", onLost);
-    state.raf = requestAnimationFrame(tick);
+    scheduleNext(0);
 
     return () => {
       cancelAnimationFrame(state.raf);
+      if (state.timer) window.clearTimeout(state.timer);
       visibility.disconnect();
       sizes.disconnect();
       canvas.removeEventListener("webglcontextlost", onLost);

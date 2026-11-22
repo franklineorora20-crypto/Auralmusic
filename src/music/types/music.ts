@@ -23,6 +23,11 @@ export type TrackLicensing = {
   note?: string;
 };
 
+export type TrackEmbeddedLyrics = {
+  syncedLyrics?: string;
+  plainLyrics?: string;
+};
+
 export type Track = {
   /** Globally unique id: `${providerId}-${providerTrackId}`. */
   id: string;
@@ -55,6 +60,8 @@ export type Track = {
   imported?: boolean;
   /** Track has an offline copy in IndexedDB. */
   downloaded?: boolean;
+  /** Lyrics parsed from embedded audio file tags (ID3v2 / FLAC). */
+  lyrics?: TrackEmbeddedLyrics;
 };
 
 export type Artist = {
@@ -155,10 +162,10 @@ export const PROVIDER_NAMES: Record<ProviderId, string> = {
 };
 
 export const PROVIDER_ACCENTS: Record<ProviderId, string> = {
-  audius: "#8fe9a3",
-  jamendo: "#8fb8ef",
-  local: "#e9c66f",
-  sample: "#c9b6ef",
+  audius: "#5b7c65",
+  jamendo: "#4d6480",
+  local: "#c49e64",
+  sample: "#8b6f4e",
 };
 
 export const PROVIDER_DOCS: Record<ProviderId, string> = {

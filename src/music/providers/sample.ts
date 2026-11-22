@@ -22,12 +22,12 @@ type SampleSeed = {
 };
 
 const SEEDS: SampleSeed[] = [
-  { id: "aurora", title: "Aurora Drift", artist: "Nova Pines", album: "Light / Time", duration: 372, src: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3", artwork: "linear-gradient(135deg, #c4ff8a 0%, #45a7ff 55%, #8f63ff 100%)", accent: "#8fe9a3", genre: "Electronic" },
-  { id: "velvet", title: "Velvet Hours", artist: "Mara Vale", album: "Afterimage", duration: 425, src: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3", artwork: "linear-gradient(135deg, #ffb36b 0%, #ef6d9d 48%, #7857d8 100%)", accent: "#ffab75", genre: "Alternative" },
-  { id: "tide", title: "Tidal Memory", artist: "Juniper Field", album: "Coastal Air", duration: 398, src: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3", artwork: "linear-gradient(135deg, #68e4bc 0%, #55a3db 52%, #3557a8 100%)", accent: "#66d7be", genre: "Ambient" },
-  { id: "night", title: "Night Transit", artist: "The Lanterns", album: "Blue Line", duration: 346, src: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3", artwork: "linear-gradient(135deg, #f5df80 0%, #d78953 45%, #57449a 100%)", accent: "#e9c66f", genre: "Indie" },
-  { id: "glow", title: "Soft Glow", artist: "Sora Lane", album: "Small Wonders", duration: 291, src: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3", artwork: "linear-gradient(135deg, #ff7e73 0%, #ffb86c 45%, #ffe89a 100%)", accent: "#ff9581", genre: "Soul" },
-  { id: "parallel", title: "Parallel Skies", artist: "Atlas Bloom", album: "Long Distance", duration: 412, src: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-10.mp3", artwork: "linear-gradient(135deg, #72a8ff 0%, #7f68d9 48%, #e573b7 100%)", accent: "#8799ef", genre: "Pop" },
+  { id: "aurora", title: "Aurora Drift", artist: "Nova Pines", album: "Light / Time", duration: 372, src: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3", artwork: "linear-gradient(135deg, #2d5241 0%, #4d6480 55%, #1d2633 100%)", accent: "#5b7c65", genre: "Electronic" },
+  { id: "velvet", title: "Velvet Hours", artist: "Mara Vale", album: "Afterimage", duration: 425, src: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3", artwork: "linear-gradient(135deg, #9f7940 0%, #7a313c 52%, #24191c 100%)", accent: "#b88a56", genre: "Alternative" },
+  { id: "tide", title: "Tidal Memory", artist: "Juniper Field", album: "Coastal Air", duration: 398, src: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3", artwork: "linear-gradient(135deg, #3c6958 0%, #3a526e 52%, #19222b 100%)", accent: "#567d70", genre: "Ambient" },
+  { id: "night", title: "Night Transit", artist: "The Lanterns", album: "Blue Line", duration: 346, src: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3", artwork: "linear-gradient(135deg, #c49e64 0%, #8b4e3c 50%, #241b16 100%)", accent: "#c49e64", genre: "Indie" },
+  { id: "glow", title: "Soft Glow", artist: "Sora Lane", album: "Small Wonders", duration: 291, src: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3", artwork: "linear-gradient(135deg, #8b4e3c 0%, #a87e49 48%, #2e211a 100%)", accent: "#b37c55", genre: "Soul" },
+  { id: "parallel", title: "Parallel Skies", artist: "Atlas Bloom", album: "Long Distance", duration: 412, src: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-10.mp3", artwork: "linear-gradient(135deg, #3f5878 0%, #5c4e6b 50%, #1c1f29 100%)", accent: "#627896", genre: "Pop" },
 ];
 
 export const sampleTracks: Track[] = SEEDS.map((seed) => ({

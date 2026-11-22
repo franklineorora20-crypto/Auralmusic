@@ -18,6 +18,7 @@ import {
 import { fetchTrackAudio } from "./music/services/downloadService";
 import { sampleTracks } from "./music/providers/sample";
 import { setLocalTracks } from "./music/providers";
+import { extractEmbeddedLyricsFromAudioBytes } from "./music/lib/lyrics";
 import { GENRE_CATEGORIES } from "./music/types/music";
 import type { Playlist, ProviderId, RepeatMode, Track } from "./types";
 import { PROVIDER_ACCENTS, PROVIDER_NAMES } from "./music/types/music";
@@ -93,6 +94,7 @@ function migrateTrack(stored: StoredTrack): Track | null {
     ...(stored.permalink ? { permalink: stored.permalink } : {}),
     accent: stored.accent ?? PROVIDER_ACCENTS[providerId],
     ...(stored.imported ? { imported: true } : {}),
+    ...(stored.lyrics ? { lyrics: stored.lyrics } : {}),
   };
 }
 
@@ -202,6 +204,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [savedAlbumIds, setSavedAlbumIds] = useState<string[]>(() => getSaved<string[]>(STORAGE_KEYS.savedAlbums, []));
   const [followedArtistIds, setFollowedArtistIds] = useState<string[]>(() => getSaved<string[]>(STORAGE_KEYS.followedArtists, []));
   const controllers = useRef(new Map<string, AbortController>());
+  const offlineUrlsRef = useRef(new Map<string, string>());
 
   const offlineById = useMemo(() => new Map(offlineTracks.map((track) => [track.id, track])), [offlineTracks]);
 
@@ -220,15 +223,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     setLocalTracks(offlineTracks.filter((track) => track.imported));
   }, [offlineTracks]);
-
-  useEffect(() => {
-    void Promise.all([listOfflineTracks(), getOfflineUsage()])
-      .then(([savedTracks, usage]) => {
-        setOfflineTracks(savedTracks);
-        setStorageUsage(usage);
-      })
-      .catch((error: unknown) => setStorageError(messageFrom(error, "Offline storage is unavailable.")));
-  }, []);
 
   useEffect(() => save(STORAGE_KEYS.catalogue, catalogueTracks.slice(-CATALOGUE_LIMIT)), [catalogueTracks]);
   useEffect(() => save(STORAGE_KEYS.playlists, playlists), [playlists]);
@@ -265,12 +259,37 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const setQueue = useCallback((ids: string[]) => setQueueIds(Array.isArray(ids) ? ids : []), []);
 
   const [downloads, setDownloads] = useState<Track[]>([]);
-  const refreshDownloads = useCallback(() => {
-    void listOfflineTracks()
-      .then((tracks) => setDownloads(tracks))
-      .catch(() => setStorageError(messageFrom(new Error("Offline storage is unavailable."), "Offline storage is unavailable.")));
+  const refreshDownloads = useCallback(async () => {
+    try {
+      const [rawTracks, usage] = await Promise.all([listOfflineTracks(), getOfflineUsage()]);
+      const activeIds = new Set(rawTracks.map((track) => track.id));
+      for (const [id, url] of offlineUrlsRef.current.entries()) {
+        if (!activeIds.has(id)) {
+          URL.revokeObjectURL(url);
+          offlineUrlsRef.current.delete(id);
+        }
+      }
+      const resolved = rawTracks.map((track) => {
+        const existingUrl = offlineUrlsRef.current.get(track.id);
+        if (existingUrl && track.streamUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(track.streamUrl);
+          return { ...track, streamUrl: existingUrl };
+        }
+        if (track.streamUrl.startsWith("blob:")) {
+          offlineUrlsRef.current.set(track.id, track.streamUrl);
+        }
+        return track;
+      });
+      setOfflineTracks(resolved);
+      setDownloads(resolved);
+      setStorageUsage(usage);
+    } catch (error: unknown) {
+      setStorageError(messageFrom(error, "Offline storage is unavailable."));
+    }
   }, []);
-  useEffect(() => refreshDownloads(), [refreshDownloads]);
+  useEffect(() => {
+    void refreshDownloads();
+  }, [refreshDownloads]);
 
   const downloadsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -407,8 +426,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         onProgress: (percent) => setDownloadProgress((previous) => ({ ...previous, [id]: percent })),
       });
       await saveOfflineTrack(track, blob);
-      refreshDownloads();
-      setOfflineTracks((previous) => previous.map((item) => item.id === id ? { ...item, downloaded: true } : item));
+      await refreshDownloads();
       return true;
     } catch (error: unknown) {
       if (error instanceof DOMException && error.name === "AbortError") {
@@ -439,8 +457,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const removeDownload = useCallback(async (id: string) => {
     await removeOfflineTrack(id);
-    refreshDownloads();
-    setOfflineTracks((previous) => previous.filter((item) => item.id !== id));
+    await refreshDownloads();
   }, [refreshDownloads]);
 
   const importAudio = useCallback(async (files: File[]): Promise<{ imported: number; skipped: number }> => {
@@ -452,7 +469,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         continue;
       }
       try {
-        const { title, artist } = parseFileName(file.name);
+        const parsedName = parseFileName(file.name);
+        const headerBytes = new Uint8Array(await file.slice(0, 512 * 1024).arrayBuffer());
+        const embedded = extractEmbeddedLyricsFromAudioBytes(headerBytes);
+        const title = embedded?.title || parsedName.title;
+        const artist = embedded?.artist || parsedName.artist;
+        const album = embedded?.album || "Imported";
+        const lyrics = embedded?.syncedLyrics || embedded?.plainLyrics
+          ? {
+              ...(embedded.syncedLyrics ? { syncedLyrics: embedded.syncedLyrics } : {}),
+              ...(embedded.plainLyrics ? { plainLyrics: embedded.plainLyrics } : {}),
+            }
+          : undefined;
         const id = `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
         const track: Track = {
           id,
@@ -461,7 +489,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           providerTrackId: id,
           title,
           artist,
-          album: "Imported",
+          album,
           artwork: "",
           artworkSmall: "",
           duration: 0,
@@ -476,6 +504,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           },
           accent: PROVIDER_ACCENTS.local,
           imported: true,
+          ...(lyrics ? { lyrics } : {}),
         };
         await saveOfflineTrack(track, file);
         imported += 1;
@@ -483,13 +512,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         skipped += 1;
       }
     }
-    refreshDownloads();
+    await refreshDownloads();
     return { imported, skipped };
   }, [refreshDownloads]);
 
   const removeLocalTrack = useCallback(async (id: string) => {
     await removeOfflineTrack(id);
-    refreshDownloads();
+    await refreshDownloads();
   }, [refreshDownloads]);
 
   const value = useMemo<Store>(() => ({
