@@ -9,6 +9,7 @@ import {
   UserRound, VolumeX, Wifi, WifiOff, X, PanelLeftClose, PanelLeftOpen, ChevronsUp, Clock, Radio,
 } from "lucide-react";
 import LyricsPanel from "./components/LyricsPanel";
+import { CrumpledAppScreen, PaperTossOverlay, playPaperRustle, type PaperTossItem } from "./components/PaperStage";
 import { OfflineIndicator, PWAInstallButton } from "./components/PWAInstallButton";
 import { useOnlineStatus, usePWAInstall } from "./pwa/usePWAInstall";
 import { StoreProvider, useStore } from "./store";
@@ -77,7 +78,26 @@ function AuralApp() {
   const [expandedPlayer, setExpandedPlayer] = useState(false);
   const [npLyricsOpen, setNpLyricsOpen] = useState(false);
   const [stageScrolled, setStageScrolled] = useState(false);
+  const [paperPhase, setPaperPhase] = useState<"open" | "crumpling" | "crumpled" | "unfolding">("open");
+  const [paperTosses, setPaperTosses] = useState<PaperTossItem[]>([]);
+  const tossIdRef = useRef(0);
+  const paperTimerRef = useRef<number | null>(null);
   const mainStageRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 900px)");
+    const onChange = (event: MediaQueryListEvent) => {
+      setSidebarCollapsed(event.matches);
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (paperTimerRef.current !== null) window.clearTimeout(paperTimerRef.current);
+    };
+  }, []);
   const [crossfadeEnabled, setCrossfadeEnabled] = useState(() => {
     try { return JSON.parse(localStorage.getItem("aural-crossfade") ?? "false") as boolean; } catch { return false; }
   });
@@ -364,13 +384,87 @@ function AuralApp() {
     }
   };
 
+  const spawnPaperToss = (label: string, origin: PaperTossItem["origin"] = "center", accent = current.accent) => {
+    if (typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const id = ++tossIdRef.current;
+    setPaperTosses((prev) => [...prev.slice(-3), { id, label, origin, accent }]);
+    window.setTimeout(() => {
+      setPaperTosses((prev) => prev.filter((item) => item.id !== id));
+    }, 680);
+  };
+
+  const closeExpandedPlayer = () => {
+    if (!expandedPlayer) return;
+    spawnPaperToss(current.title, "center", current.accent);
+    setExpandedPlayer(false);
+  };
+
+  const closeQueuePanel = () => {
+    if (!queueOpen) return;
+    spawnPaperToss("Queue", "right", current.accent);
+    setQueueOpen(false);
+  };
+
+  const closeLyricsPanel = () => {
+    if (!lyricsOpen) return;
+    spawnPaperToss("Lyrics", "right", current.accent);
+    setLyricsOpen(false);
+  };
+
+  const closeCreateModal = () => {
+    if (!createOpen) return;
+    spawnPaperToss("New playlist", "center", "#c49e64");
+    setCreateOpen(false);
+  };
+
+  const closeAddModal = () => {
+    if (!addTrackId) return;
+    spawnPaperToss("Add to playlist", "center", "#c49e64");
+    setAddTrackId("");
+  };
+
+  const quitToPaperBall = () => {
+    if (paperPhase !== "open") return;
+    playPaperRustle("crumple");
+    audioRef.current?.pause();
+    setIsPlaying(false);
+    setExpandedPlayer(false);
+    setQueueOpen(false);
+    setLyricsOpen(false);
+    setCreateOpen(false);
+    setAddTrackId("");
+    setPaperPhase("crumpling");
+    if (paperTimerRef.current !== null) window.clearTimeout(paperTimerRef.current);
+    paperTimerRef.current = window.setTimeout(() => {
+      setPaperPhase("crumpled");
+      paperTimerRef.current = null;
+    }, 380);
+  };
+
+  const unfoldFromPaperBall = () => {
+    if (paperPhase !== "crumpled") return;
+    playPaperRustle("unfold");
+    setPaperPhase("unfolding");
+    if (paperTimerRef.current !== null) window.clearTimeout(paperTimerRef.current);
+    paperTimerRef.current = window.setTimeout(() => {
+      setPaperPhase("open");
+      paperTimerRef.current = null;
+    }, 420);
+  };
+
   const navigate = (nextView: View, id = "") => {
+    const leavingDetail =
+      (view === "artist" || view === "album" || view === "playlist") &&
+      (nextView !== view || id !== selectedId);
+    if (leavingDetail) {
+      spawnPaperToss(selectedId || view, "top", current.accent);
+    }
     setView(nextView);
     setSelectedId(id);
     if (mainStageRef.current) mainStageRef.current.scrollTop = 0;
     setStageScrolled(false);
-    setHistory((current) => {
-      const active = current.slice(0, historyIndex + 1);
+    setHistory((currentHistory) => {
+      const active = currentHistory.slice(0, historyIndex + 1);
       const next = [...active, { view: nextView, selectedId: id }];
       setHistoryIndex(next.length - 1);
       return next;
@@ -381,6 +475,9 @@ function AuralApp() {
     const nextIndex = historyIndex + offset;
     const destination = history[nextIndex];
     if (!destination) return;
+    if (view === "artist" || view === "album" || view === "playlist") {
+      spawnPaperToss(selectedId || view, "top", current.accent);
+    }
     setHistoryIndex(nextIndex);
     setView(destination.view);
     setSelectedId(destination.selectedId);
@@ -395,6 +492,11 @@ function AuralApp() {
     playPrevious,
     currentTime,
     expandedPlayer,
+    closeExpandedPlayer,
+    closeQueuePanel,
+    closeLyricsPanel,
+    closeCreateModal,
+    closeAddModal,
   });
   shortcutRef.current = {
     togglePlayback,
@@ -403,6 +505,11 @@ function AuralApp() {
     playPrevious,
     currentTime,
     expandedPlayer,
+    closeExpandedPlayer,
+    closeQueuePanel,
+    closeLyricsPanel,
+    closeCreateModal,
+    closeAddModal,
   };
 
   useEffect(() => {
@@ -450,9 +557,11 @@ function AuralApp() {
           return next;
         });
       } else if (event.key === "Escape") {
-        setExpandedPlayer(false);
-        setLyricsOpen(false);
-        setQueueOpen(false);
+        shortcutRef.current.closeExpandedPlayer();
+        shortcutRef.current.closeLyricsPanel();
+        shortcutRef.current.closeQueuePanel();
+        shortcutRef.current.closeCreateModal();
+        shortcutRef.current.closeAddModal();
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -957,8 +1066,9 @@ function AuralApp() {
           fps={36}
         />
       </div>
+      {paperPhase !== "crumpled" && (
       <div
-        className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${isPlaying ? "is-playing" : ""}`}
+        className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${isPlaying ? "is-playing" : ""} ${paperPhase === "crumpling" ? "app-shell--crumpling" : paperPhase === "unfolding" ? "app-shell--unfolding" : ""}`}
         style={{ "--ambient-accent": current.accent } as React.CSSProperties}
       >
       <aside className="sidebar">
@@ -999,6 +1109,19 @@ function AuralApp() {
           <div className="history-buttons"><button onClick={() => navigateHistory(-1)} disabled={historyIndex === 0} aria-label="Back"><ArrowLeft size={16} /></button><button onClick={() => navigateHistory(1)} disabled={historyIndex >= history.length - 1} aria-label="Forward"><ArrowRight size={16} /></button></div>
           <div className="topbar-actions">
             <PWAInstallButton pwa={pwa} variant="topbar" />
+            <button
+              className="quit-crumple-button"
+              onClick={quitToPaperBall}
+              aria-label="Quit and crumple page"
+              title="Quit & crumple page"
+            >
+              <svg width="15" height="15" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                <path d="M4 2.5h6.5L14.5 6.5V15a1 1 0 0 1-1 1h-9.5a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+                <path d="M10.5 2.5V6.5H14.5" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+                <path d="M6.5 9.8l5 3.4M11.5 9.8l-5 3.4" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+              </svg>
+              <span>Quit</span>
+            </button>
             <button className="profile-chip" aria-label="Open local library profile" title="Library" onClick={() => navigate("library")}><UserRound size={16} /></button>
           </div>
         </header>
@@ -1093,13 +1216,13 @@ function AuralApp() {
 
       {expandedPlayer && (
         <div
-          className={`now-playing-overlay ${npLyricsOpen ? "with-lyrics" : ""} ${isPlaying ? "is-playing" : "is-paused"}`}
+          className={`now-playing-overlay paper-unfold ${npLyricsOpen ? "with-lyrics" : ""} ${isPlaying ? "is-playing" : "is-paused"}`}
           style={{ "--accent": current.accent } as React.CSSProperties}
           role="dialog"
           aria-modal="true"
           aria-label="Now playing"
-          onKeyDown={(event) => { if (event.key === "Escape") setExpandedPlayer(false); }}
-          onClick={(event) => { if (event.target === event.currentTarget) setExpandedPlayer(false); }}
+          onKeyDown={(event) => { if (event.key === "Escape") closeExpandedPlayer(); }}
+          onClick={(event) => { if (event.target === event.currentTarget) closeExpandedPlayer(); }}
         >
           {current.artwork.startsWith("http") && (
             <img
@@ -1132,7 +1255,7 @@ function AuralApp() {
               title="CRT visualizer"
             ><Radio size={19} /></button>
           </div>
-          <button className="icon-button np-close" onClick={() => setExpandedPlayer(false)} aria-label="Close player" autoFocus><X size={20} /></button>
+          <button className="icon-button np-close" onClick={closeExpandedPlayer} aria-label="Close player" autoFocus><X size={20} /></button>
           <div className="now-playing-layout">
             <div className="now-playing-view">
               <div className={`np-artwork-frame ${crtVisualizer ? "has-crt" : ""}`}>
@@ -1198,9 +1321,9 @@ function AuralApp() {
       <input ref={fileRef} className="hidden-input" type="file" accept="audio/*" multiple onChange={handleImport} />
 
       {createOpen && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCreateOpen(false); }}>
-          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="create-title">
-            <button className="modal-close" onClick={() => setCreateOpen(false)} aria-label="Close"><X size={18} /></button>
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreateModal(); }}>
+          <div className="modal paper-unfold" role="dialog" aria-modal="true" aria-labelledby="create-title">
+            <button className="modal-close" onClick={closeCreateModal} aria-label="Close"><X size={18} /></button>
             <h2 id="create-title">Create a playlist</h2>
             <p>Give this collection a name.</p>
             <input autoFocus value={playlistName} onChange={(event) => setPlaylistName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") createPlaylist(); }} placeholder="Playlist name" />
@@ -1210,9 +1333,9 @@ function AuralApp() {
       )}
 
       {addTrackId && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAddTrackId(""); }}>
-          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="add-title">
-            <button className="modal-close" onClick={() => setAddTrackId("")} aria-label="Close"><X size={18} /></button>
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeAddModal(); }}>
+          <div className="modal paper-unfold" role="dialog" aria-modal="true" aria-labelledby="add-title">
+            <button className="modal-close" onClick={closeAddModal} aria-label="Close"><X size={18} /></button>
             <h2 id="add-title">Add to playlist</h2>
             <p>Choose a playlist for this track.</p>
             {store.playlists.map((playlist) => (
@@ -1226,8 +1349,8 @@ function AuralApp() {
       )}
 
       {queueOpen && (
-        <aside className="queue-panel" aria-label="Queue">
-          <header><div><p className="eyebrow">Now next</p><h2>Queue</h2></div><button className="icon-button" onClick={() => setQueueOpen(false)} aria-label="Close queue"><X size={18} /></button></header>
+        <aside className="queue-panel paper-unfold" aria-label="Queue">
+          <header><div><p className="eyebrow">Now next</p><h2>Queue</h2></div><button className="icon-button" onClick={closeQueuePanel} aria-label="Close queue"><X size={18} /></button></header>
           <div className="queue-list">
             {current && (
               <div className="queue-item now-playing-item" aria-current="true">
@@ -1255,17 +1378,28 @@ function AuralApp() {
         </aside>
       )}
       {lyricsOpen && current && (
-        <aside className="lyrics-panel" aria-label="Lyrics">
+        <aside className="lyrics-panel paper-unfold" aria-label="Lyrics">
           <LyricsPanel
             variant="drawer"
             track={current}
             currentTime={currentTime}
             onSeek={seekToTime}
-            onClose={() => setLyricsOpen(false)}
+            onClose={closeLyricsPanel}
           />
         </aside>
       )}
       </div>
+      )}
+      {(paperPhase === "crumpled" || paperPhase === "unfolding") && (
+        <CrumpledAppScreen
+          trackTitle={current.title}
+          trackArtist={current.artist}
+          accent={current.accent}
+          unfolding={paperPhase === "unfolding"}
+          onUnfold={unfoldFromPaperBall}
+        />
+      )}
+      <PaperTossOverlay items={paperTosses} />
     </>
   );
 }
