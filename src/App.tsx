@@ -9,6 +9,8 @@ import {
   UserRound, VolumeX, Wifi, WifiOff, X, PanelLeftClose, PanelLeftOpen, ChevronsUp, Clock, Radio,
 } from "lucide-react";
 import LyricsPanel from "./components/LyricsPanel";
+import { OfflineIndicator, PWAInstallButton } from "./components/PWAInstallButton";
+import { useOnlineStatus, usePWAInstall } from "./pwa/usePWAInstall";
 import { StoreProvider, useStore } from "./store";
 import { demoTracks } from "./data";
 import type { Track, View } from "./types";
@@ -52,7 +54,8 @@ function AuralApp() {
   const [searchHasMore, setSearchHasMore] = useState(false);
   const [catalogueLoading, setCatalogueLoading] = useState(false);
   const [catalogueError, setCatalogueError] = useState("");
-  const [online, setOnline] = useState(navigator.onLine);
+  const online = useOnlineStatus();
+  const pwa = usePWAInstall();
   const [searchHistory, setSearchHistory] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("aural-search-history") ?? "[]") as string[]; }
     catch { return []; }
@@ -172,16 +175,6 @@ function AuralApp() {
     const nextId = store.queueIds[nextIdx];
     return nextId && nextId !== currentId ? store.tracks.find((t) => t.id === nextId) : undefined;
   }, [currentId, store.queueIds, store.repeat, store.tracks]);
-
-  useEffect(() => {
-    const updateOnline = () => setOnline(navigator.onLine);
-    window.addEventListener("online", updateOnline);
-    window.addEventListener("offline", updateOnline);
-    return () => {
-      window.removeEventListener("online", updateOnline);
-      window.removeEventListener("offline", updateOnline);
-    };
-  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -802,6 +795,7 @@ function AuralApp() {
           {online ? <Wifi size={16} /> : <WifiOff size={16} />}{online ? "Online" : "Offline"}
         </div>
       </div>
+      <PWAInstallButton pwa={pwa} variant="card" />
       <div className="storage-card">
         <HardDrive size={19} />
         <div><strong>{store.downloads.length} offline track{store.downloads.length === 1 ? "" : "s"}</strong><small>{(store.storageUsage / (1024 * 1024)).toFixed(1)} MB stored in this browser</small></div>
@@ -988,6 +982,7 @@ function AuralApp() {
           {!store.playlists.length && <p className="sidebar-empty">No playlists yet</p>}
         </div>
         <div className="sidebar-footer">
+          <PWAInstallButton pwa={pwa} variant="sidebar" />
           <button className="import-button" onClick={() => fileRef.current?.click()}><Upload size={16} /> Import audio</button>
           <button className="collapse-button" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}>
             {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <><PanelLeftClose size={16} /> Collapse</>}
@@ -1002,12 +997,16 @@ function AuralApp() {
       >
         <header className={`topbar ${stageScrolled ? "scrolled" : ""}`}>
           <div className="history-buttons"><button onClick={() => navigateHistory(-1)} disabled={historyIndex === 0} aria-label="Back"><ArrowLeft size={16} /></button><button onClick={() => navigateHistory(1)} disabled={historyIndex >= history.length - 1} aria-label="Forward"><ArrowRight size={16} /></button></div>
-          <button className="profile-chip" aria-label="Open local library profile" title="Library" onClick={() => navigate("library")}><UserRound size={16} /></button>
+          <div className="topbar-actions">
+            <PWAInstallButton pwa={pwa} variant="topbar" />
+            <button className="profile-chip" aria-label="Open local library profile" title="Library" onClick={() => navigate("library")}><UserRound size={16} /></button>
+          </div>
         </header>
         {content}
         {importMessage && <div className="toast global-toast" role="status">{importMessage}</div>}
         {store.storageError && view !== "downloads" && <p className="catalogue-error storage-error" role="alert">{store.storageError}</p>}
       </main>
+      <OfflineIndicator online={online} />
 
       <footer className="player" aria-label="Music player">
         <div className="now-playing">

@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { registerSW } from "virtual:pwa-register";
 import App from "./App";
 import "./styles.css";
 
@@ -9,10 +10,11 @@ createRoot(document.getElementById("root")!).render(
   </StrictMode>,
 );
 
-if ("serviceWorker" in navigator && import.meta.env.PROD) {
-  window.addEventListener("load", () => {
-    void navigator.serviceWorker.register("/sw.js").catch(() => {
+if ("serviceWorker" in navigator) {
+  registerSW({
+    immediate: true,
+    onRegisterError() {
       // The app remains usable when service-worker registration is unavailable.
-    });
+    },
   });
 }

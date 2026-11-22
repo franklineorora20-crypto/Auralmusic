@@ -227,7 +227,8 @@ button { border: 0; cursor: pointer; color: inherit; background: transparent; }
 .sidebar-collapsed .sidebar-heading span,
 .sidebar-collapsed .sidebar-empty,
 .sidebar-collapsed .sidebar-section button,
-.sidebar-collapsed .import-button { display: none; }
+.sidebar-collapsed .import-button,
+.sidebar-collapsed .install-sidebar-button { display: none; }
 .sidebar-collapsed .primary-nav button span { display: none; }
 .sidebar-collapsed .collapse-button { height: 34px; justify-content: center; padding: 0; }
 .sidebar-collapsed .primary-nav button { justify-content: center; padding: 0; }
@@ -320,7 +321,8 @@ button { border: 0; cursor: pointer; color: inherit; background: transparent; }
 }
 .history-buttons button:active, .profile-chip:active { transform: scale(0.92); }
 .history-buttons button:disabled { opacity: 0.3; cursor: default; }
-.profile-chip { margin-left: auto; }
+.topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.profile-chip { flex: 0 0 auto; }
 
 .page {
   position: relative;
@@ -961,6 +963,170 @@ button { border: 0; cursor: pointer; color: inherit; background: transparent; }
 .connection-status.online svg { color: #78a37c; }
 .connection-status.offline { color: #e6a9a4; }
 .storage-error { margin: 0 36px 20px; }
+
+/* ---------- App Download & PWA Install UI ---------- */
+
+.install-topbar-button {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border-radius: var(--r-full);
+  border: 1px solid rgba(223, 192, 138, 0.34);
+  background: rgba(21, 19, 16, 0.72);
+  color: var(--gold-tint);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast), transform var(--t-fast);
+}
+.install-topbar-button:hover {
+  background: rgba(196, 158, 100, 0.16);
+  border-color: var(--gold-tint);
+  color: var(--text);
+}
+.install-topbar-button:active { transform: scale(0.97); }
+
+.install-sidebar-button {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: var(--r-xs);
+  border: 1px solid rgba(223, 192, 138, 0.28);
+  background: rgba(196, 158, 100, 0.11);
+  color: var(--gold-tint);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast);
+}
+.install-sidebar-button:hover {
+  background: rgba(196, 158, 100, 0.2);
+  border-color: var(--gold-tint);
+  color: var(--text);
+}
+
+.install-app-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  border-radius: var(--r-md);
+  border: 1px solid rgba(223, 192, 138, 0.28);
+  background: linear-gradient(135deg, rgba(196, 158, 100, 0.12), var(--panel) 62%);
+  padding: 16px 18px;
+}
+.install-app-copy {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  flex: 1 1 260px;
+}
+.install-app-copy > div:last-child { display: grid; gap: 3px; min-width: 0; }
+.install-app-copy strong { font-size: 15px; font-weight: 600; color: var(--text); }
+.install-app-copy small { font-size: 13px; color: var(--text-2); line-height: 1.4; }
+.install-app-icon {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  background: rgba(223, 192, 138, 0.14);
+  border: 1px solid rgba(223, 192, 138, 0.26);
+  color: var(--gold-tint);
+}
+.install-card-btn { flex: 0 0 auto; }
+.install-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--r-full);
+  background: rgba(120, 163, 124, 0.14);
+  border: 1px solid rgba(120, 163, 124, 0.34);
+  color: #a9d1ad;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.install-modal { width: min(440px, calc(100vw - 32px)); }
+.install-modal-header { display: flex; align-items: center; gap: 12px; padding-right: 24px; }
+.install-modal-header .eyebrow { margin-bottom: 2px; color: var(--gold-tint); }
+.install-modal-emblem {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  background: var(--gold-soft);
+  border: 1px solid rgba(223, 192, 138, 0.28);
+  color: var(--gold-tint);
+}
+.install-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 10px;
+}
+.install-steps li {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.45;
+}
+.install-step-num {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--gold-soft);
+  color: var(--gold-tint);
+  font-size: 12px;
+  font-weight: 700;
+}
+.install-modal-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 4px; }
+.install-modal-actions a { text-decoration: none; }
+
+.offline-indicator {
+  position: fixed;
+  left: 20px;
+  bottom: 92px;
+  z-index: 65;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: var(--r-full);
+  background: var(--glass-strong);
+  border: 1px solid rgba(223, 192, 138, 0.34);
+  color: var(--gold-tint);
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: var(--shadow-2);
+  backdrop-filter: blur(16px);
+}
+.offline-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--gold-tint);
+}
 
 .playlist-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 20px 16px; }
 .playlist-card {
@@ -1705,6 +1871,7 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 0; bo
   .main-stage { grid-column: 1; grid-row: 1; }
   .topbar, .topbar.scrolled { position: static; height: 42px; padding: 6px 16px 0; border-bottom: 0; background: transparent; backdrop-filter: none; }
   .history-buttons { display: none; }
+  .offline-indicator { left: 12px; bottom: 130px; max-width: calc(100vw - 24px); }
   .page { padding: 4px 16px 32px; }
   .welcome-row h1, .library-header h1 { font-size: 28px; }
   .quick-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
