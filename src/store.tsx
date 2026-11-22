@@ -11,6 +11,7 @@ import {
 import {
   formatBytes,
   getOfflineUsage,
+  listOfflineMetadata,
   listOfflineTracks,
   removeOfflineTrack,
   saveOfflineTrack,
@@ -23,9 +24,24 @@ import { GENRE_CATEGORIES } from "./music/types/music";
 import type { Playlist, ProviderId, RepeatMode, Track } from "./types";
 import { PROVIDER_ACCENTS, PROVIDER_NAMES } from "./music/types/music";
 
+export type LibraryFolder = {
+  id: string;
+  name: string;
+  parentId: string | null;
+  trackIds: string[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type OfflineFileMeta = {
+  bytes: number;
+  savedAt: number;
+};
+
 const STORAGE_KEYS = {
   catalogue: "aural-catalogue",
   playlists: "aural-playlists",
+  folders: "aural-fs-folders",
   favourites: "aural-favourites",
   recent: "aural-recent",
   likedPlaylists: "aural-liked-playlists",
@@ -108,8 +124,10 @@ type Store = {
   storageUsage: number;
   storageUsageLabel: string;
   storageError: string;
+  offlineMeta: Record<string, OfflineFileMeta>;
   clearStorageError: () => void;
   playlists: Playlist[];
+  folders: LibraryFolder[];
   favouriteIds: string[];
   recentIds: string[];
   likedPlaylistIds: string[];
@@ -123,6 +141,12 @@ type Store = {
   renamePlaylist: (id: string, name: string) => void;
   describePlaylist: (id: string, description: string) => void;
   deletePlaylist: (id: string) => void;
+  createFolder: (name: string, parentId?: string | null) => LibraryFolder;
+  renameFolder: (id: string, name: string) => void;
+  deleteFolder: (id: string) => void;
+  addTrackToFolder: (folderId: string, trackId: string) => void;
+  removeTrackFromFolder: (folderId: string, trackId: string) => void;
+  moveTrackToFolder: (fromFolderId: string | null, toFolderId: string, trackId: string) => void;
   togglePlaylistLike: (id: string) => void;
   toggleSavedAlbum: (id: string) => void;
   toggleFollowedArtist: (id: string) => void;
@@ -136,7 +160,7 @@ type Store = {
   downloadTrack: (id: string) => Promise<boolean>;
   cancelDownload: (id: string) => void;
   removeDownload: (id: string) => Promise<void>;
-  importAudio: (files: File[]) => Promise<{ imported: number; skipped: number }>;
+  importAudio: (files: File[], targetFolderId?: string | null) => Promise<{ imported: number; skipped: number }>;
   removeLocalTrack: (id: string) => Promise<void>;
   volume: number;
   shuffle: boolean;
@@ -182,6 +206,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return stored.map(migrateTrack).filter((track): track is Track => track !== null);
   });
   const [offlineTracks, setOfflineTracks] = useState<Track[]>([]);
+  const [offlineMeta, setOfflineMeta] = useState<Record<string, OfflineFileMeta>>({});
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
   const [storageUsage, setStorageUsage] = useState(0);
   const [storageError, setStorageError] = useState("");
@@ -196,6 +221,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         trackIds: playlist.trackIds.filter((id): id is string => typeof id === "string"),
         createdAt: playlist.createdAt ?? Date.now(),
         updatedAt: playlist.updatedAt ?? Date.now(),
+      }));
+  });
+  const [folders, setFolders] = useState<LibraryFolder[]>(() => {
+    const stored = getSaved<LibraryFolder[]>(STORAGE_KEYS.folders, []);
+    return stored
+      .filter((folder) => folder && typeof folder.id === "string" && Array.isArray(folder.trackIds))
+      .map((folder) => ({
+        id: folder.id,
+        name: folder.name || "Untitled folder",
+        parentId: typeof folder.parentId === "string" ? folder.parentId : null,
+        trackIds: folder.trackIds.filter((id): id is string => typeof id === "string"),
+        createdAt: folder.createdAt ?? Date.now(),
+        updatedAt: folder.updatedAt ?? Date.now(),
       }));
   });
   const [favouriteIds, setFavouriteIds] = useState<string[]>(() => getSaved<string[]>(STORAGE_KEYS.favourites, []));
@@ -226,6 +264,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => save(STORAGE_KEYS.catalogue, catalogueTracks.slice(-CATALOGUE_LIMIT)), [catalogueTracks]);
   useEffect(() => save(STORAGE_KEYS.playlists, playlists), [playlists]);
+  useEffect(() => save(STORAGE_KEYS.folders, folders), [folders]);
   useEffect(() => save(STORAGE_KEYS.favourites, favouriteIds), [favouriteIds]);
   useEffect(() => save(STORAGE_KEYS.recent, recentIds), [recentIds]);
   useEffect(() => save(STORAGE_KEYS.likedPlaylists, likedPlaylistIds), [likedPlaylistIds]);
@@ -261,7 +300,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [downloads, setDownloads] = useState<Track[]>([]);
   const refreshDownloads = useCallback(async () => {
     try {
-      const [rawTracks, usage] = await Promise.all([listOfflineTracks(), getOfflineUsage()]);
+      const [rawTracks, usage, metadata] = await Promise.all([
+        listOfflineTracks(),
+        getOfflineUsage(),
+        listOfflineMetadata(),
+      ]);
       const activeIds = new Set(rawTracks.map((track) => track.id));
       for (const [id, url] of offlineUrlsRef.current.entries()) {
         if (!activeIds.has(id)) {
@@ -280,6 +323,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
         return track;
       });
+      const metaMap: Record<string, OfflineFileMeta> = {};
+      for (const entry of metadata) {
+        metaMap[entry.id] = { bytes: entry.bytes, savedAt: entry.savedAt };
+      }
+      setOfflineMeta(metaMap);
       setOfflineTracks(resolved);
       setDownloads(resolved);
       setStorageUsage(usage);
@@ -356,6 +404,79 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const deletePlaylist = useCallback((id: string) => {
     setPlaylists((previous) => previous.filter((playlist) => playlist.id !== id));
     setLikedPlaylistIds((previous) => previous.filter((item) => item !== id));
+  }, []);
+
+  const createFolder = useCallback((name: string, parentId: string | null = null): LibraryFolder => {
+    const clean = name.trim().replace(/[\\/]+/g, "-") || "New Folder";
+    const now = Date.now();
+    const folder: LibraryFolder = {
+      id: `dir-${now.toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      name: clean,
+      parentId: parentId ?? null,
+      trackIds: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    setFolders((previous) => [...previous, folder]);
+    return folder;
+  }, []);
+
+  const renameFolder = useCallback((id: string, name: string) => {
+    const clean = name.trim().replace(/[\\/]+/g, "-");
+    if (!clean) return;
+    setFolders((previous) =>
+      previous.map((folder) => (folder.id === id ? { ...folder, name: clean, updatedAt: Date.now() } : folder)),
+    );
+  }, []);
+
+  const deleteFolder = useCallback((id: string) => {
+    setFolders((previous) => {
+      const toDelete = new Set<string>([id]);
+      let added = true;
+      while (added) {
+        added = false;
+        for (const folder of previous) {
+          if (folder.parentId && toDelete.has(folder.parentId) && !toDelete.has(folder.id)) {
+            toDelete.add(folder.id);
+            added = true;
+          }
+        }
+      }
+      return previous.filter((folder) => !toDelete.has(folder.id));
+    });
+  }, []);
+
+  const addTrackToFolder = useCallback((folderId: string, trackId: string) => {
+    setFolders((previous) =>
+      previous.map((folder) => {
+        if (folder.id !== folderId || folder.trackIds.includes(trackId)) return folder;
+        return { ...folder, trackIds: [...folder.trackIds, trackId], updatedAt: Date.now() };
+      }),
+    );
+  }, []);
+
+  const removeTrackFromFolder = useCallback((folderId: string, trackId: string) => {
+    setFolders((previous) =>
+      previous.map((folder) =>
+        folder.id === folderId
+          ? { ...folder, trackIds: folder.trackIds.filter((id) => id !== trackId), updatedAt: Date.now() }
+          : folder,
+      ),
+    );
+  }, []);
+
+  const moveTrackToFolder = useCallback((fromFolderId: string | null, toFolderId: string, trackId: string) => {
+    setFolders((previous) =>
+      previous.map((folder) => {
+        if (folder.id === fromFolderId && folder.id !== toFolderId) {
+          return { ...folder, trackIds: folder.trackIds.filter((id) => id !== trackId), updatedAt: Date.now() };
+        }
+        if (folder.id === toFolderId && !folder.trackIds.includes(trackId)) {
+          return { ...folder, trackIds: [...folder.trackIds, trackId], updatedAt: Date.now() };
+        }
+        return folder;
+      }),
+    );
   }, []);
 
   const addToPlaylist = useCallback((playlistId: string, trackId: string) => {
@@ -460,9 +581,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     await refreshDownloads();
   }, [refreshDownloads]);
 
-  const importAudio = useCallback(async (files: File[]): Promise<{ imported: number; skipped: number }> => {
+  const importAudio = useCallback(async (files: File[], targetFolderId: string | null = null): Promise<{ imported: number; skipped: number }> => {
     let imported = 0;
     let skipped = 0;
+    const importedIds: string[] = [];
     for (const file of files) {
       if (!isAudioFile(file)) {
         skipped += 1;
@@ -507,10 +629,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           ...(lyrics ? { lyrics } : {}),
         };
         await saveOfflineTrack(track, file);
+        importedIds.push(id);
         imported += 1;
       } catch {
         skipped += 1;
       }
+    }
+    if (targetFolderId && importedIds.length > 0) {
+      setFolders((previous) =>
+        previous.map((folder) => {
+          if (folder.id !== targetFolderId) return folder;
+          const nextIds = [...folder.trackIds];
+          for (const id of importedIds) if (!nextIds.includes(id)) nextIds.push(id);
+          return { ...folder, trackIds: nextIds, updatedAt: Date.now() };
+        }),
+      );
     }
     await refreshDownloads();
     return { imported, skipped };
@@ -518,6 +651,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const removeLocalTrack = useCallback(async (id: string) => {
     await removeOfflineTrack(id);
+    setFolders((previous) =>
+      previous.map((folder) =>
+        folder.trackIds.includes(id)
+          ? { ...folder, trackIds: folder.trackIds.filter((item) => item !== id), updatedAt: Date.now() }
+          : folder,
+      ),
+    );
     await refreshDownloads();
   }, [refreshDownloads]);
 
@@ -530,8 +670,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     storageUsage,
     storageUsageLabel: formatBytes(storageUsage),
     storageError,
+    offlineMeta,
     clearStorageError: () => setStorageError(""),
     playlists,
+    folders,
     favouriteIds,
     recentIds,
     likedPlaylistIds,
@@ -545,6 +687,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     renamePlaylist,
     describePlaylist,
     deletePlaylist,
+    createFolder,
+    renameFolder,
+    deleteFolder,
+    addTrackToFolder,
+    removeTrackFromFolder,
+    moveTrackToFolder,
     togglePlaylistLike,
     toggleSavedAlbum,
     toggleFollowedArtist,
@@ -570,10 +718,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setQueue,
     addCatalogueTracks,
   }), [
-    tracks, catalogueTracks, downloads, downloadProgress, storageUsage, storageError,
-    playlists, favouriteIds, recentIds, likedPlaylistIds, savedAlbumIds, followedArtistIds,
+    tracks, catalogueTracks, downloads, downloadProgress, storageUsage, storageError, offlineMeta,
+    playlists, folders, favouriteIds, recentIds, likedPlaylistIds, savedAlbumIds, followedArtistIds,
     getTrack, rememberTracks, isFavourite, toggleFavourite, createPlaylist, renamePlaylist,
-    describePlaylist, deletePlaylist, togglePlaylistLike, toggleSavedAlbum, toggleFollowedArtist,
+    describePlaylist, deletePlaylist, createFolder, renameFolder, deleteFolder,
+    addTrackToFolder, removeTrackFromFolder, moveTrackToFolder,
+    togglePlaylistLike, toggleSavedAlbum, toggleFollowedArtist,
     addToPlaylist, addTracksToPlaylist, removeFromPlaylist, reorderPlaylistTrack, movePlaylistTrack,
     addRecent, downloadTrack, cancelDownload, removeDownload, importAudio, removeLocalTrack,
     volume, shuffle, repeat, queueIds, setVolume, setShuffle, setRepeat, setQueue, addCatalogueTracks,

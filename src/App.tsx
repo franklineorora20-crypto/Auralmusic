@@ -8,6 +8,7 @@ import {
   Repeat1, Repeat2, Search, Shuffle, SkipBack, SkipForward, Trash2, Upload, Volume2,
   UserRound, VolumeX, Wifi, WifiOff, X, PanelLeftClose, PanelLeftOpen, ChevronsUp, Clock, Radio,
 } from "lucide-react";
+import LibraryFileSystem from "./components/LibraryFileSystem";
 import LyricsPanel from "./components/LyricsPanel";
 import { CrumpledAppScreen, PaperTossOverlay, playPaperRustle, type PaperTossItem } from "./components/PaperStage";
 import { OfflineIndicator, PWAInstallButton } from "./components/PWAInstallButton";
@@ -181,6 +182,7 @@ function AuralApp() {
     };
   }, [crossfadeEnabled, isPlaying, currentId, store.queueIds, store.shuffle, store.repeat, store.tracks, store.volume]);
   const fileRef = useRef<HTMLInputElement>(null);
+  const importTargetFolderRef = useRef<string | null>(null);
   const loadMoreController = useRef<AbortController | null>(null);
 
   const current = store.tracks.find((track) => track.id === currentId) ?? store.tracks[0];
@@ -568,14 +570,26 @@ function AuralApp() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const handleImport = (event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? []);
+  const handleDropImport = (files: File[], targetFolderId?: string | null) => {
     if (!files.length) return;
-    void store.importAudio(files).then(() => {
+    void store.importAudio(files, targetFolderId ?? null).then(() => {
       setImportMessage(`${files.length} audio file${files.length === 1 ? "" : "s"} added to your offline library`);
     }).catch((error: unknown) => {
       setImportMessage(error instanceof Error ? error.message : "The audio files could not be imported.");
     }).finally(() => window.setTimeout(() => setImportMessage(""), 3500));
+  };
+
+  const triggerImportPicker = (targetFolderId: string | null = null) => {
+    importTargetFolderRef.current = targetFolderId;
+    fileRef.current?.click();
+  };
+
+  const handleImport = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    const targetFolderId = importTargetFolderRef.current;
+    importTargetFolderRef.current = null;
+    if (!files.length) return;
+    handleDropImport(files, targetFolderId);
     event.target.value = "";
   };
 
@@ -831,11 +845,22 @@ function AuralApp() {
       <div className="library-header">
         <div><p className="eyebrow">Collection</p><h1>Library</h1></div>
         <div className="library-actions">
-          <button onClick={() => fileRef.current?.click()}><Upload size={16} /> Import audio</button>
+          <button onClick={() => triggerImportPicker(null)}><Upload size={16} /> Import audio</button>
           <button onClick={() => setCreateOpen(true)}><Plus size={16} /> New playlist</button>
         </div>
       </div>
       <button className="downloads-link" onClick={() => navigate("downloads")}><Download size={16} /> Downloads <span>{store.downloads.length}</span></button>
+      <LibraryFileSystem
+        currentId={currentId}
+        isPlaying={isPlaying}
+        onPlayTrack={playTrack}
+        onNavigate={navigate}
+        onAddTrackToPlaylist={(trackId) => setAddTrackId(trackId)}
+        onOpenNewPlaylist={() => setCreateOpen(true)}
+        onImportFiles={handleDropImport}
+        onTriggerImportPicker={triggerImportPicker}
+        onFolderExitToss={(label) => spawnPaperToss(label, "top", current.accent)}
+      />
       <section className="content-section">
         <div className="section-heading"><h2>Playlists</h2></div>
         <div className="playlist-grid">
@@ -1093,7 +1118,7 @@ function AuralApp() {
         </div>
         <div className="sidebar-footer">
           <PWAInstallButton pwa={pwa} variant="sidebar" />
-          <button className="import-button" onClick={() => fileRef.current?.click()}><Upload size={16} /> Import audio</button>
+          <button className="import-button" onClick={() => triggerImportPicker(null)}><Upload size={16} /> Import audio</button>
           <button className="collapse-button" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}>
             {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <><PanelLeftClose size={16} /> Collapse</>}
           </button>
@@ -1131,12 +1156,18 @@ function AuralApp() {
       </main>
       <OfflineIndicator online={online} />
 
-      <footer className="player" aria-label="Music player">
+      <footer
+        className="player"
+        aria-label="Music player"
+        style={{
+          "--progress": `${duration ? Math.min(100, (currentTime / (duration || current.duration || 1)) * 100) : 0}%`,
+        } as React.CSSProperties}
+      >
         <div className="now-playing">
           <button className="np-thumb-trigger" onClick={() => setExpandedPlayer(true)} aria-label="Open now playing view">
             <Artwork track={current} size="small" />
           </button>
-          <div><strong>{current.title}</strong><button onClick={() => navigate("artist", current.artist)}>{current.artist}{current.providerId === "sample" ? " · Sample preview" : ""}</button></div>
+          <div key={current.id} className="np-track-unfold"><strong>{current.title}</strong><button onClick={() => navigate("artist", current.artist)}>{current.artist}{current.providerId === "sample" ? " · Sample preview" : ""}</button></div>
           <button className={`icon-button ${store.favouriteIds.includes(current.id) ? "active" : ""}`} onClick={() => store.toggleFavourite(current.id)} aria-label="Favourite current track"><Heart size={17} fill={store.favouriteIds.includes(current.id) ? "currentColor" : "none"} /></button>
           <button className="icon-button expand-button" onClick={() => setExpandedPlayer(true)} aria-label="Expand player" title="Expand (F)"><ChevronsUp size={16} /></button>
         </div>
@@ -1258,10 +1289,10 @@ function AuralApp() {
           <button className="icon-button np-close" onClick={closeExpandedPlayer} aria-label="Close player" autoFocus><X size={20} /></button>
           <div className="now-playing-layout">
             <div className="now-playing-view">
-              <div className={`np-artwork-frame ${crtVisualizer ? "has-crt" : ""}`}>
+              <div key={`art-${current.id}`} className={`np-artwork-frame np-track-unfold ${crtVisualizer ? "has-crt" : ""}`}>
                 <Artwork track={current} size="hero" />
               </div>
-              <div className="np-meta">
+              <div key={`meta-${current.id}`} className="np-meta np-track-unfold">
                 <strong>{current.title}</strong>
                 <button onClick={() => { setExpandedPlayer(false); navigate("artist", current.artist); }}>{current.artist}</button>
               </div>

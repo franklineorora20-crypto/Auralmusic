@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { BookOpen, RotateCcw } from "lucide-react";
 
 export interface PaperTossItem {
@@ -185,8 +185,9 @@ export function PaperTossOverlay({ items }: { items: PaperTossItem[] }) {
 
 /**
  * Resting state after the user clicks "Quit & crumple page":
- * The app sits crumpled into an interactive 3D paper ball over the ferrofluid canvas.
- * Poking the ball bounces/spins it; clicking "Unfold page" unfolds the app back open.
+ * The app sits crumpled into an interactive physics-enabled 3D paper ball over
+ * the ferrofluid canvas. Drag-and-flick or tap "Toss ball" to throw it around
+ * the viewport with gravity and wall bounces; click "Unfold page" to restore.
  */
 export function CrumpledAppScreen({
   trackTitle,
@@ -201,8 +202,145 @@ export function CrumpledAppScreen({
   unfolding: boolean;
   onUnfold: () => void;
 }) {
-  const [pokeCount, setPokeCount] = useState(0);
-  const [bouncing, setBouncing] = useState(false);
+  const ballRef = useRef<HTMLButtonElement>(null);
+  const physicsRef = useRef({
+    x: 0,
+    y: 0,
+    vx: 0,
+    vy: 0,
+    rot: 0,
+    angVel: 0,
+    active: false,
+    dragging: false,
+    dragOffsetX: 0,
+    dragOffsetY: 0,
+    dragStartX: 0,
+    dragStartY: 0,
+    lastPointerX: 0,
+    lastPointerY: 0,
+    lastTime: 0,
+    movedDuringDrag: false,
+  });
+  const rafRef = useRef<number | null>(null);
+  const [tossCount, setTossCount] = useState(0);
+
+  const applyTransform = useCallback(() => {
+    const el = ballRef.current;
+    if (!el) return;
+    const p = physicsRef.current;
+    el.style.transform = `translate3d(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px, 0) rotate(${p.rot.toFixed(1)}deg)`;
+  }, []);
+
+  const stopLoop = useCallback(() => {
+    if (rafRef.current !== null) {
+      window.cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    physicsRef.current.active = false;
+  }, []);
+
+  const startLoop = useCallback(() => {
+    if (rafRef.current !== null) return;
+    const prefersReduced =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReduced) return;
+
+    physicsRef.current.active = true;
+    let previousTs = performance.now();
+
+    const step = (ts: number) => {
+      const dt = Math.min(0.032, Math.max(0.004, (ts - previousTs) / 1000));
+      previousTs = ts;
+      const p = physicsRef.current;
+
+      if (p.dragging) {
+        applyTransform();
+        rafRef.current = window.requestAnimationFrame(step);
+        return;
+      }
+
+      const ballWidth = ballRef.current?.offsetWidth ?? 150;
+      const maxX = Math.max(80, window.innerWidth / 2 - ballWidth * 0.55);
+      const maxUp = Math.max(80, window.innerHeight * 0.36);
+      const floorY = Math.max(20, window.innerHeight * 0.16);
+
+      // Gravity + spring gently back toward resting spot once settled near floor
+      const gravity = 1650;
+      p.vy += gravity * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.rot += p.angVel * dt;
+
+      // Wall collisions
+      if (p.x > maxX) {
+        p.x = maxX;
+        p.vx = -Math.abs(p.vx) * 0.72;
+        p.angVel = -p.angVel * 0.7 + (p.vy * 0.12);
+        playPaperRustle("crumple");
+      } else if (p.x < -maxX) {
+        p.x = -maxX;
+        p.vx = Math.abs(p.vx) * 0.72;
+        p.angVel = -p.angVel * 0.7 - (p.vy * 0.12);
+        playPaperRustle("crumple");
+      }
+
+      // Ceiling collision
+      if (p.y < -maxUp) {
+        p.y = -maxUp;
+        p.vy = Math.abs(p.vy) * 0.65;
+      }
+
+      // Floor collision with bounce
+      if (p.y > floorY) {
+        p.y = floorY;
+        if (Math.abs(p.vy) > 95) {
+          p.vy = -Math.abs(p.vy) * 0.62;
+          p.vx *= 0.86;
+          p.angVel = p.vx * 0.45;
+          playPaperRustle("crumple");
+        } else {
+          p.vy = 0;
+          p.vx *= 0.9;
+          p.angVel = p.vx * 0.4;
+        }
+      }
+
+      // Air drag
+      p.vx *= Math.pow(0.84, dt * 6);
+      p.angVel *= Math.pow(0.86, dt * 6);
+
+      // Gentle return home once resting on the floor
+      if (Math.abs(p.y - floorY) < 2 && Math.abs(p.vy) < 10 && Math.abs(p.vx) < 25) {
+        p.x += (0 - p.x) * Math.min(1, dt * 5.5);
+        p.y += (0 - p.y) * Math.min(1, dt * 5.5);
+        p.rot += (0 - (p.rot % 360)) * Math.min(1, dt * 4);
+      }
+
+      applyTransform();
+
+      const settled =
+        Math.abs(p.x) < 0.8 &&
+        Math.abs(p.y) < 0.8 &&
+        Math.abs(p.vx) < 8 &&
+        Math.abs(p.vy) < 8;
+
+      if (settled) {
+        p.x = 0;
+        p.y = 0;
+        p.vx = 0;
+        p.vy = 0;
+        p.angVel = 0;
+        applyTransform();
+        stopLoop();
+        return;
+      }
+
+      rafRef.current = window.requestAnimationFrame(step);
+    };
+
+    rafRef.current = window.requestAnimationFrame(step);
+  }, [applyTransform, stopLoop]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -212,14 +350,81 @@ export function CrumpledAppScreen({
       }
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onUnfold]);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      stopLoop();
+    };
+  }, [onUnfold, stopLoop]);
 
-  const pokeBall = () => {
-    playPaperRustle("crumple");
-    setPokeCount((count) => count + 1);
-    setBouncing(false);
-    window.requestAnimationFrame(() => setBouncing(true));
+  const launchToss = useCallback(
+    (customVx?: number, customVy?: number) => {
+      playPaperRustle("crumple");
+      const p = physicsRef.current;
+      const dir = Math.random() > 0.5 ? 1 : -1;
+      p.vx = customVx ?? dir * (340 + Math.random() * 340);
+      p.vy = customVy ?? -(540 + Math.random() * 260);
+      p.angVel = (p.vx >= 0 ? 1 : -1) * (320 + Math.random() * 260);
+      setTossCount((count) => count + 1);
+      startLoop();
+    },
+    [startLoop],
+  );
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const p = physicsRef.current;
+    p.dragging = true;
+    p.movedDuringDrag = false;
+    p.dragStartX = event.clientX;
+    p.dragStartY = event.clientY;
+    p.lastPointerX = event.clientX;
+    p.lastPointerY = event.clientY;
+    p.dragOffsetX = event.clientX - p.x;
+    p.dragOffsetY = event.clientY - p.y;
+    p.lastTime = performance.now();
+    p.vx = 0;
+    p.vy = 0;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    startLoop();
+  };
+
+  const handlePointerMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const p = physicsRef.current;
+    if (!p.dragging) return;
+    const now = performance.now();
+    const dt = Math.max(0.008, (now - p.lastTime) / 1000);
+    const nextX = event.clientX - p.dragOffsetX;
+    const nextY = event.clientY - p.dragOffsetY;
+    if (Math.hypot(event.clientX - p.dragStartX, event.clientY - p.dragStartY) > 5) {
+      p.movedDuringDrag = true;
+    }
+    const instVx = Math.max(-1600, Math.min(1600, (event.clientX - p.lastPointerX) / dt));
+    const instVy = Math.max(-1600, Math.min(1600, (event.clientY - p.lastPointerY) / dt));
+    p.vx = p.vx * 0.35 + instVx * 0.65;
+    p.vy = p.vy * 0.35 + instVy * 0.65;
+    p.x = nextX;
+    p.y = nextY;
+    p.rot += (event.clientX - p.lastPointerX) * 0.45;
+    p.lastPointerX = event.clientX;
+    p.lastPointerY = event.clientY;
+    p.lastTime = now;
+    applyTransform();
+  };
+
+  const handlePointerUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const p = physicsRef.current;
+    if (!p.dragging) return;
+    p.dragging = false;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (!p.movedDuringDrag) {
+      launchToss();
+    } else {
+      playPaperRustle("crumple");
+      p.angVel = p.vx * 0.55;
+      setTossCount((count) => count + 1);
+      startLoop();
+    }
   };
 
   return (
@@ -231,31 +436,33 @@ export function CrumpledAppScreen({
     >
       <div className="crumpled-ball-cluster">
         <button
+          ref={ballRef}
           type="button"
-          className={`crumpled-ball-button ${bouncing ? "is-bouncing" : ""}`}
-          onClick={pokeBall}
+          className="crumpled-ball-button"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
           onDoubleClick={onUnfold}
-          onAnimationEnd={() => setBouncing(false)}
-          aria-label="Crumpled paper ball. Click to bounce or double-click to unfold."
-          style={{ "--poke-rot": `${(pokeCount * 47) % 360}deg` } as CSSProperties}
+          aria-label="Crumpled paper ball. Drag and throw, tap to toss, or double-click to unfold."
         >
           <span className="crumpled-ball-shadow" aria-hidden="true" />
           <PaperBallSvg accent={accent} className="crumpled-ball-hero" />
         </button>
 
         <div className="crumpled-copy">
-          <p className="eyebrow">Page crumpled</p>
+          <p className="eyebrow">Page crumpled{tossCount > 0 ? ` · ${tossCount} toss${tossCount === 1 ? "" : "es"}` : ""}</p>
           <h1>{trackTitle}</h1>
           <p className="crumpled-artist">{trackArtist}</p>
           <div className="crumpled-actions">
             <button type="button" className="primary-button" onClick={onUnfold} autoFocus>
               <BookOpen size={16} /> Unfold page
             </button>
-            <button type="button" className="secondary-button" onClick={pokeBall}>
+            <button type="button" className="secondary-button" onClick={() => launchToss()}>
               <RotateCcw size={15} /> Toss ball
             </button>
           </div>
-          <p className="crumpled-hint">Tap the ball to toss it, or unfold to pick up where you left off.</p>
+          <p className="crumpled-hint">Drag &amp; throw the ball anywhere, tap Toss ball, or unfold to resume.</p>
         </div>
       </div>
     </div>
