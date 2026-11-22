@@ -1,0 +1,17 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+.andromity/
+
+.env
+.env.local
+.env.*.local
+.env*.local
+
+dev.log
+*.log
+.continue/

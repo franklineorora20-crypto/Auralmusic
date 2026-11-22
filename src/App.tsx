@@ -1,0 +1,1090 @@
+import { memo, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import CRTWarp from "./components/CRTWarp";
+import {
+  ArrowLeft, ArrowLeftRight, ArrowRight, ChevronDown, ChevronUp, Download, HardDrive,
+  Heart, Home, Library, ListMusic, Pause, Play, Plus,
+  Repeat1, Repeat2, Search, Shuffle, SkipBack, SkipForward, Trash2, Upload, Volume2,
+  UserRound, VolumeX, Wifi, WifiOff, X, PanelLeftClose, PanelLeftOpen, ChevronsUp, Clock, Radio,
+} from "lucide-react";
+import { StoreProvider, useStore } from "./store";
+import { demoTracks } from "./data";
+import type { Track, View } from "./types";
+import { getTrending, searchMusic } from "./catalog";
+
+
+const formatTime = (seconds: number) => {
+  if (!Number.isFinite(seconds)) return "0:00";
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
+};
+
+/** Memoised so time updates in the player don't re-render every visible row. */
+const Artwork = memo(function Artwork({ track, size = "card", className = "" }: { track: Track; size?: "card" | "small" | "hero"; className?: string }) {
+  return <div className={`artwork artwork-${size} ${className}`} style={{ background: track.accent }} aria-label={`${track.album} artwork`}>
+    {track.artwork.startsWith("http")
+      ? <img
+          src={track.artwork}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          width={size === "small" ? 56 : size === "hero" ? 300 : 400}
+          height={size === "small" ? 56 : size === "hero" ? 300 : 400}
+          onError={(event) => { event.currentTarget.style.display = "none"; }}
+        />
+      : null}
+    <span aria-hidden="true">{track.title.split(" ").map((word) => word[0]).join("").slice(0, 2)}</span>
+  </div>;
+});
+
+function AuralApp() {
+  const store = useStore();
+  const [view, setView] = useState<View>("home");
+  const [selectedId, setSelectedId] = useState("");
+  const [query, setQuery] = useState("");
+  const [searchFilter, setSearchFilter] = useState("All");
+  const [searchTracks, setSearchTracks] = useState<Track[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [searchOffset, setSearchOffset] = useState(0);
+  const [searchHasMore, setSearchHasMore] = useState(false);
+  const [catalogueLoading, setCatalogueLoading] = useState(false);
+  const [catalogueError, setCatalogueError] = useState("");
+  const [online, setOnline] = useState(navigator.onLine);
+  const [searchHistory, setSearchHistory] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem("aural-search-history") ?? "[]") as string[]; }
+    catch { return []; }
+  });
+  const [currentId, setCurrentId] = useState(store.queueIds[0] ?? demoTracks[0].id);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackError, setPlaybackError] = useState("");
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [addTrackId, setAddTrackId] = useState("");
+  const [playlistName, setPlaylistName] = useState("");
+  const [importMessage, setImportMessage] = useState("");
+  const [history, setHistory] = useState<Array<{ view: View; selectedId: string }>>([{ view: "home", selectedId: "" }]);
+  const [historyIndex, setHistoryIndex] = useState(0);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.innerWidth <= 900);
+  const [expandedPlayer, setExpandedPlayer] = useState(false);
+  const [crossfadeEnabled, setCrossfadeEnabled] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("aural-crossfade") ?? "false") as boolean; } catch { return false; }
+  });
+  const [crtVisualizer, setCrtVisualizer] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("aural-crt") ?? "false") as boolean; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("aural-crossfade", JSON.stringify(crossfadeEnabled)); } catch { /* storage unavailable */ }
+  }, [crossfadeEnabled]);
+  useEffect(() => {
+    try { localStorage.setItem("aural-crt", JSON.stringify(crtVisualizer)); } catch { /* storage unavailable */ }
+  }, [crtVisualizer]);
+  const crossfadeRef = useRef<HTMLAudioElement | null>(null);
+  const fadingRef = useRef(false);
+  const audioRef = useRef<HTMLAudioElement>(null);
+
+  /**
+   * Crossfade: starts a second audio element ~6s before track end, ramps both
+   * volumes, then hands playback back to the main element. Plain media elements
+   * (no Web Audio decode) so CORS-restricted provider streams keep working.
+   */
+  useEffect(() => {
+    const primary = audioRef.current;
+    if (!primary || !crossfadeEnabled || !isPlaying) return;
+    const CROSSFADE_SECONDS = 6;
+
+    const startFade = () => {
+      if (fadingRef.current || !primary.duration || !Number.isFinite(primary.duration)) return;
+      const remaining = primary.duration - primary.currentTime;
+      if (remaining > CROSSFADE_SECONDS || remaining <= 0.2) return;
+      fadingRef.current = true;
+
+      const index = store.queueIds.indexOf(currentId);
+      let nextIndex = index + 1;
+      if (store.shuffle && store.queueIds.length > 1) {
+        do nextIndex = Math.floor(Math.random() * store.queueIds.length);
+        while (nextIndex === index);
+      }
+      if (nextIndex >= store.queueIds.length) {
+        if (store.repeat !== "all") { fadingRef.current = false; return; }
+        nextIndex = 0;
+      }
+      const nextTrack = store.tracks.find((track) => track.id === store.queueIds[nextIndex]);
+      if (!nextTrack) { fadingRef.current = false; return; }
+
+      const ghost = new Audio(nextTrack.streamUrl);
+      ghost.volume = 0;
+      ghost.preload = "auto";
+      crossfadeRef.current = ghost;
+      const startVolume = store.volume;
+      const fade = window.setInterval(() => {
+        primary.volume = Math.max(0, primary.volume - 0.05);
+        ghost.volume = Math.min(startVolume, ghost.volume + 0.05);
+        if (primary.volume <= 0.02) {
+          window.clearInterval(fade);
+          fadingRef.current = false;
+          crossfadeRef.current = null;
+          setCurrentId(nextTrack.id);
+          store.addRecent(nextTrack.id);
+          setCurrentTime(0);
+          setIsPlaying(true);
+          const primaryAfter = audioRef.current;
+          if (primaryAfter) {
+            primaryAfter.volume = startVolume;
+            primaryAfter.src = nextTrack.streamUrl;
+            void primaryAfter.play().catch(() => setIsPlaying(false));
+          }
+          ghost.pause();
+          ghost.src = "";
+        }
+      }, 250);
+    };
+
+    primary.addEventListener("timeupdate", startFade);
+    return () => {
+      primary.removeEventListener("timeupdate", startFade);
+      crossfadeRef.current?.pause();
+      crossfadeRef.current = null;
+      fadingRef.current = false;
+      if (audioRef.current) audioRef.current.volume = store.volume;
+    };
+  }, [crossfadeEnabled, isPlaying, currentId, store.queueIds, store.shuffle, store.repeat, store.tracks, store.volume]);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const loadMoreController = useRef<AbortController | null>(null);
+
+  const current = store.tracks.find((track) => track.id === currentId) ?? store.tracks[0];
+  const recentTracks = store.recentIds.map((id) => store.tracks.find((track) => track.id === id)).filter((track): track is Track => Boolean(track));
+  const queueTracks = store.queueIds.map((id) => store.tracks.find((track) => track.id === id)).filter((track): track is Track => Boolean(track));
+  const downloadedIds = new Set(store.downloads.map((track) => track.id));
+
+  useEffect(() => {
+    const updateOnline = () => setOnline(navigator.onLine);
+    window.addEventListener("online", updateOnline);
+    window.addEventListener("offline", updateOnline);
+    return () => {
+      window.removeEventListener("online", updateOnline);
+      window.removeEventListener("offline", updateOnline);
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setCatalogueLoading(true);
+        getTrending(controller.signal)
+
+      .then((tracks) => {
+        store.addCatalogueTracks(tracks);
+        setCatalogueError("");
+      })
+      .catch((error: unknown) => {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setCatalogueError(error instanceof Error ? error.message : "Could not load the Audius catalogue.");
+        }
+      })
+      .finally(() => setCatalogueLoading(false));
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const term = query.trim();
+    if (view !== "search" || !term) {
+      setSearchTracks([]);
+      setSearchError("");
+      setSearchLoading(false);
+      return;
+    }
+    setSearchTracks([]);
+    setSearchHasMore(false);
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setSearchLoading(true);
+      setSearchError("");
+      setSearchOffset(0);
+            searchMusic(term, controller.signal)
+
+        .then((tracks) => {
+          setSearchTracks(tracks);
+          setSearchHasMore(tracks.length === 20);
+          store.addCatalogueTracks(tracks);
+          setSearchHistory((previous) => {
+            const updated = [term, ...previous.filter((item) => item.toLowerCase() !== term.toLowerCase())].slice(0, 8);
+            localStorage.setItem("aural-search-history", JSON.stringify(updated));
+            return updated;
+          });
+        })
+        .catch((error: unknown) => {
+          if (!(error instanceof DOMException && error.name === "AbortError")) {
+            setSearchError(error instanceof Error ? error.message : "Could not search the Audius catalogue.");
+          }
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setSearchLoading(false);
+        });
+    }, 300);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+      loadMoreController.current?.abort();
+      loadMoreController.current = null;
+    };
+  }, [query, view]);
+
+  const loadMoreSearchResults = () => {
+    const term = query.trim();
+    if (!term || searchLoading) return;
+    const nextOffset = searchOffset + 20;
+    loadMoreController.current?.abort();
+    const controller = new AbortController();
+    loadMoreController.current = controller;
+    setSearchLoading(true);
+        searchMusic(term, controller.signal, nextOffset)
+
+      .then((tracks) => {
+        setSearchTracks((previous) => [...previous, ...tracks]);
+        setSearchOffset(nextOffset);
+        setSearchHasMore(tracks.length === 20);
+        store.addCatalogueTracks(tracks);
+      })
+      .catch((error: unknown) => {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setSearchError(error instanceof Error ? error.message : "Could not load more catalogue results.");
+        }
+      })
+      .finally(() => {
+        if (loadMoreController.current === controller) {
+          loadMoreController.current = null;
+          setSearchLoading(false);
+        }
+      });
+  };
+
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = store.volume;
+  }, [store.volume]);
+
+  useEffect(() => {
+    if (!audioRef.current) return;
+    audioRef.current.load();
+    if (isPlaying) {
+      void audioRef.current.play().catch(() => setIsPlaying(false));
+    }
+  }, [currentId]);
+
+  const playTrack = (track: Track, collection?: Track[]) => {
+    if (collection?.length) {
+      store.setQueue(collection.map((item) => item.id));
+    } else if (!store.queueIds.includes(track.id)) {
+      store.setQueue([...store.queueIds, track.id]);
+    }
+    store.addRecent(track.id);
+    if (track.id === currentId) {
+      if (audioRef.current) {
+        if (isPlaying) audioRef.current.pause();
+        else void audioRef.current.play().catch(() => setIsPlaying(false));
+      }
+      setIsPlaying((playing) => !playing);
+    } else {
+      setCurrentId(track.id);
+      setCurrentTime(0);
+      setIsPlaying(true);
+    }
+    setPlaybackError("");
+  };
+
+  const togglePlayback = () => {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    } else {
+      void audioRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+    }
+  };
+
+  const playNext = () => {
+    if (!store.queueIds.length) return;
+    const index = store.queueIds.indexOf(currentId);
+    let nextIndex = index + 1;
+    if (store.shuffle && store.queueIds.length > 1) {
+      do nextIndex = Math.floor(Math.random() * store.queueIds.length);
+      while (nextIndex === index);
+    }
+    if (nextIndex >= store.queueIds.length) {
+      if (store.repeat !== "all") {
+        audioRef.current?.pause();
+        setIsPlaying(false);
+        return;
+      }
+      nextIndex = 0;
+    }
+    const nextId = store.queueIds[nextIndex];
+    if (nextId) {
+      setCurrentId(nextId);
+      store.addRecent(nextId);
+      setIsPlaying(true);
+    }
+  };
+
+  const playPrevious = () => {
+    if (audioRef.current && audioRef.current.currentTime > 4) {
+      audioRef.current.currentTime = 0;
+      return;
+    }
+    const index = store.queueIds.indexOf(currentId);
+    if (index <= 0 && store.repeat !== "all") return;
+    const previousId = store.queueIds[(index - 1 + store.queueIds.length) % store.queueIds.length];
+    if (previousId) {
+      setCurrentId(previousId);
+      store.addRecent(previousId);
+      setIsPlaying(true);
+    }
+  };
+
+  const handleEnded = () => {
+    if (store.repeat === "one" && audioRef.current) {
+      audioRef.current.currentTime = 0;
+      void audioRef.current.play();
+    } else {
+      playNext();
+    }
+  };
+
+  const navigate = (nextView: View, id = "") => {
+    setView(nextView);
+    setSelectedId(id);
+    setHistory((current) => {
+      const active = current.slice(0, historyIndex + 1);
+      const next = [...active, { view: nextView, selectedId: id }];
+      setHistoryIndex(next.length - 1);
+      return next;
+    });
+  };
+
+  const navigateHistory = (offset: -1 | 1) => {
+    const nextIndex = historyIndex + offset;
+    const destination = history[nextIndex];
+    if (!destination) return;
+    setHistoryIndex(nextIndex);
+    setView(destination.view);
+    setSelectedId(destination.selectedId);
+  };
+
+  const handleImport = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    if (!files.length) return;
+    void store.importAudio(files).then(() => {
+      setImportMessage(`${files.length} audio file${files.length === 1 ? "" : "s"} added to your offline library`);
+    }).catch((error: unknown) => {
+      setImportMessage(error instanceof Error ? error.message : "The audio files could not be imported.");
+    }).finally(() => window.setTimeout(() => setImportMessage(""), 3500));
+    event.target.value = "";
+  };
+
+  const createPlaylist = () => {
+    if (!playlistName.trim()) return;
+    store.createPlaylist(playlistName);
+    setPlaylistName("");
+    setCreateOpen(false);
+  };
+
+  const TrackRow = ({ track, index, playlistId, collection }: { track: Track; index?: number; playlistId?: string; collection?: Track[] }) => (
+    <div className="track-row">
+      {typeof index === "number" ? <span className="track-index">{index + 1}</span> : <button className="icon-button" onClick={() => playTrack(track, collection)} aria-label={`Play ${track.title}`}><Play size={14} fill="currentColor" /></button>}
+      <button className="track-main" onClick={() => playTrack(track, collection)}>
+        <Artwork track={track} size="small" />
+                <span>
+          <strong>{track.title}</strong>
+          <small>{track.artist}{track.providerId === "sample" ? " · Sample preview" : track.providerId === "audius" ? " · Audius" : track.providerId === "jamendo" ? " · Jamendo" : ""}</small>
+        </span>
+
+      </button>
+      <button className="track-album" onClick={() => navigate("album", track.album)}>{track.album}</button>
+      <button
+        className={`icon-button favourite ${store.favouriteIds.includes(track.id) ? "active" : ""}`}
+        onClick={() => store.toggleFavourite(track.id)}
+        aria-label={store.favouriteIds.includes(track.id) ? "Remove from favourites" : "Add to favourites"}
+      ><Heart size={16} fill={store.favouriteIds.includes(track.id) ? "currentColor" : "none"} /></button>
+      {playlistId && <div className="track-reorder">
+        <button className="icon-button" onClick={() => store.reorderPlaylistTrack(playlistId, track.id, -1)} aria-label="Move track up"><ChevronUp size={15} /></button>
+        <button className="icon-button" onClick={() => store.reorderPlaylistTrack(playlistId, track.id, 1)} aria-label="Move track down"><ChevronDown size={15} /></button>
+      </div>}
+      <span className="track-duration">{formatTime(track.duration)}</span>
+      {playlistId
+        ? <button className="icon-button" onClick={() => store.removeFromPlaylist(playlistId, track.id)} aria-label={`Remove ${track.title}`}><Trash2 size={15} /></button>
+        : <button className="icon-button" onClick={() => setAddTrackId(track.id)} aria-label={`Add ${track.title} to a playlist`}><Plus size={15} /></button>}
+      {store.downloadProgress[track.id] !== undefined
+        ? <button className="download-progress-control" onClick={() => store.cancelDownload(track.id)} aria-label={`Cancel download of ${track.title}`} title="Cancel download">
+          <span role={store.downloadProgress[track.id] < 0 ? "status" : "progressbar"} aria-valuemin={0} aria-valuemax={100} aria-valuenow={store.downloadProgress[track.id] >= 0 ? store.downloadProgress[track.id] : undefined}>
+            {store.downloadProgress[track.id] < 0 ? "…" : `${store.downloadProgress[track.id]}%`}
+          </span><X size={14} />
+        </button>
+        : downloadedIds.has(track.id)
+          ? <button className="icon-button active" onClick={() => { void store.removeDownload(track.id).catch(() => undefined); }} aria-label={`Remove ${track.title} download`} title="Available offline"><HardDrive size={15} /></button>
+          : track.downloadUrl
+            ? <button className="icon-button" onClick={() => {
+              void store.downloadTrack(track.id).then((completed) => {
+                if (completed) {
+                  setImportMessage(`${track.title} is ready for offline listening.`);
+                  window.setTimeout(() => setImportMessage(""), 3500);
+                }
+              }).catch(() => undefined);
+            }} aria-label={`Download ${track.title}`} title="Request provider-authorized download"><Download size={15} /></button>
+            : <span />}
+    </div>
+  );
+
+  const CardGrid = ({ tracks, title }: { tracks: Track[]; title: string }) => (
+    <section className="content-section">
+      <div className="section-heading"><h2>{title}</h2><button onClick={() => navigate("search")}><ArrowRight size={17} /> Explore</button></div>
+      <div className="card-grid">
+        {tracks.map((track) => (
+          <article className="music-card" key={track.id}>
+            <button className="cover-button" onClick={() => playTrack(track, tracks)} aria-label={`Play ${track.title}`}>
+              <Artwork track={track} />
+              <span className="card-play"><Play size={20} fill="currentColor" /></span>
+            </button>
+            <button className="card-copy" onClick={() => navigate("album", track.album)}>
+              <strong>{track.album}</strong>
+              <small>{track.artist}</small>
+              <span className="card-badges">
+                {downloadedIds.has(track.id) && <span className="card-badge offline">Offline</span>}
+                {track.providerId === "sample" && <span className="card-badge">Sample</span>}
+                {track.providerId !== "sample" && <span className="card-badge">{track.providerName}</span>}
+              </span>
+            </button>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+
+  const filteredTracks = useMemo(() => {
+    const term = query.trim().toLowerCase();
+    return store.tracks.filter((track) => {
+      const matchesText = !term || `${track.title} ${track.artist} ${track.album} ${track.genre}`.toLowerCase().includes(term);
+      let matchesFilter = true;
+      if (searchFilter === "Artists") {
+        matchesFilter = !term || track.artist.toLowerCase().includes(term);
+      } else if (searchFilter === "Albums") {
+        matchesFilter = !term || track.album.toLowerCase().includes(term);
+      } else if (searchFilter === "Genres") {
+        matchesFilter = !term || track.genre.toLowerCase().includes(term);
+      }
+      return matchesText && matchesFilter;
+    });
+  }, [query, searchFilter, store.tracks]);
+
+  const HomeView = () => (
+    <div className="page home-page page-enter" key="home">
+      <header className="welcome-row">
+        <div><p className="eyebrow">Wednesday mix</p><h1>Good evening</h1></div>
+        <button className="profile-chip" aria-label="Open local library profile" title="Local profile" onClick={() => navigate("library")}><UserRound size={17} /></button>
+      </header>
+      {recentTracks.length > 0 && <div className="section-heading recent-heading"><h2>Recently played</h2></div>}
+      <section className="quick-grid">
+        {recentTracks.slice(0, 6).map((track) => (
+          <button className="quick-card" key={track.id} onClick={() => playTrack(track)}>
+            <Artwork track={track} size="small" />
+            <strong>{track.album}{track.providerId === "sample" ? " · Sample" : ""}</strong>
+            <span className="quick-play"><Play size={16} fill="currentColor" /></span>
+          </button>
+        ))}
+      </section>
+            {catalogueLoading && (
+        <div className="skeleton-grid" role="status" aria-label="Loading tracks">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <div className="skeleton-card" key={index}><div className="skeleton skeleton-art" /><div className="skeleton skeleton-line" /><div className="skeleton skeleton-line short" /></div>
+          ))}
+        </div>
+      )}
+      {catalogueError && <p className="catalogue-error" role="alert">{catalogueError} Cached tracks and your library are still available.</p>}
+      {!catalogueLoading && store.catalogueTracks.length > 0 && (() => {
+        const audiusTrending = store.catalogueTracks.filter(t => t.providerId === "audius");
+        const jamendoTrending = store.catalogueTracks.filter(t => t.providerId === "jamendo");
+        const hero = audiusTrending[0] ?? jamendoTrending[0] ?? demoTracks[0];
+        const heroCollection = [hero, ...store.catalogueTracks.filter(t => t.id !== hero.id).slice(0, 11)];
+        return (
+          <>
+            {hero && (
+              <section className="hero-row" aria-label="Featured track">
+          <button className="hero-card" style={{ "--accent": hero.accent } as React.CSSProperties} onClick={() => playTrack(hero, heroCollection)}>
+            <span className="hero-crt" aria-hidden="true">
+              <CRTWarp
+                color="#b8ef72"
+                backgroundColor="#141b14"
+                speed={0.28}
+                waveAmplitude={0.16}
+                waveFrequency={1.6}
+                levels={3}
+                columns={96}
+                persistence={0.42}
+                curvature={0.12}
+                scanlineStrength={0.35}
+                scanlineFrequency={260}
+                mask="aperture"
+                maskStrength={0.22}
+                bloom={1.1}
+                noise={0.06}
+                flicker={0.08}
+                interference={0.1}
+                vignette={0.4}
+                rgbShift={0.002}
+                brightness={0.72}
+                dpr={1.5}
+                fps={45}
+              />
+            </span>
+            {hero.artwork.startsWith("http") && <span className="hero-art"><img src={hero.artwork} alt="" /></span>}
+                  <span className="hero-copy">
+                    <span className="eyebrow">Featured · {hero.providerName}</span>
+                    <h2>{hero.title}</h2>
+                    <p>{hero.artist} — {hero.album}</p>
+                  </span>
+                  <span className="hero-actions">
+                    <Artwork track={hero} size="hero" />
+                  </span>
+                </button>
+              </section>
+            )}
+            <CardGrid tracks={audiusTrending.slice(0, 6)} title="Trending on Audius" />
+            <CardGrid tracks={jamendoTrending.slice(0, 6)} title="Featured on Jamendo" />
+          </>
+        );
+      })()}
+      {!catalogueLoading && store.catalogueTracks.length === 0 && <CardGrid tracks={demoTracks} title="Sample previews · not catalogue results" />}
+      <section className="content-section">
+        <div className="section-heading"><h2>Explore by mood</h2></div>
+        <div className="mood-grid">
+          {["Electronic", "Ambient", "Indie", "Soul", "Pop", "Alternative"].map((mood, index) => (
+            <button key={mood} className="mood-card" onClick={() => { setQuery(mood); setSearchFilter("Genres"); navigate("search"); }} style={{ "--mood": ["#6e57b5", "#4d8878", "#bd7659", "#a44e72", "#4c70a8", "#87603e"][index] } as React.CSSProperties}>
+              <strong>{mood}</strong><span>Explore</span>
+            </button>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+
+  const SearchView = () => (
+    <div className="page search-page page-enter" key="search">
+      <div className="search-hero">
+        <label className="search-box">
+          <Search size={20} />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="What do you want to listen to?" aria-label="Search music" />
+          {query && <button onClick={() => setQuery("")} aria-label="Clear search"><X size={16} /></button>}
+        </label>
+      </div>
+      <div className="filter-row" role="group" aria-label="Search filters">
+        {["All", "Songs", "Artists", "Albums", "Playlists", "Genres"].map((filter) => (
+          <button key={filter} className={searchFilter === filter ? "active" : ""} onClick={() => setSearchFilter(filter)}>{filter}</button>
+        ))}
+      </div>
+      {query ? (
+        <section className="search-results">
+                    <div className="section-heading"><h2>{searchFilter === "Playlists" ? "Your playlists" : "Catalogue results"}</h2><small>{searchFilter === "Playlists" ? store.playlists.filter((playlist) => playlist.name.toLowerCase().includes(query.toLowerCase())).length : searchTracks.length} results</small></div>
+          {searchLoading && <p className="catalogue-status" role="status">Searching Audius and Jamendo…</p>}
+
+          {searchError && <p className="catalogue-error" role="alert">{searchError}</p>}
+          {searchFilter === "Playlists"
+            ? store.playlists.filter((playlist) => playlist.name.toLowerCase().includes(query.toLowerCase())).map((playlist) => (
+              <button className="search-playlist-result" key={playlist.id} onClick={() => navigate("playlist", playlist.id)}><ListMusic size={19} /><strong>{playlist.name}</strong><small>{playlist.trackIds.length} tracks · Your playlist</small></button>
+            ))
+            : searchTracks.filter((track) => {
+              const term = query.trim().toLowerCase();
+              if (searchFilter === "Artists") return track.artist.toLowerCase().includes(term);
+              if (searchFilter === "Albums") return track.album.toLowerCase().includes(term);
+              if (searchFilter === "Genres") return track.genre.toLowerCase().includes(term);
+              return true;
+            }).map((track, index) => <TrackRow key={track.id} track={track} index={index} />)}
+                    {!searchLoading && !searchError && !searchTracks.length && searchFilter !== "Playlists" && <p className="catalogue-status">No matches for this search.</p>}
+
+          {searchHasMore && <button className="secondary-button load-more" onClick={loadMoreSearchResults} disabled={searchLoading}>Load more</button>}
+          {searchFilter !== "Playlists" && filteredTracks.some((track) => track.providerId === "sample" || track.providerId === "local") && (
+            <section className="content-section">
+              <div className="section-heading"><h2>Your library &amp; sample previews</h2><small>Not Audius catalogue results</small></div>
+              {filteredTracks.filter((track) => track.providerId === "sample" || track.providerId === "local").map((track, index) => <TrackRow key={track.id} track={track} index={index} />)}
+            </section>
+          )}
+        </section>
+      ) : (
+        <section className="content-section">
+          <div className="section-heading"><h2>Browse categories</h2></div>
+          {searchHistory.length > 0 && <div className="search-history"><span>Recent searches</span>{searchHistory.map((term) => <button key={term} onClick={() => setQuery(term)}>{term}</button>)}</div>}
+          <div className="category-grid">
+            {["Electronic", "Ambient", "Indie", "Soul", "Pop", "Alternative"].map((category, index) => (
+              <button key={category} onClick={() => { setQuery(category); setSearchFilter(category === "Focus" || category === "Chill" ? "All" : "Genres"); }}>
+                <strong>{category}</strong><span className="category-shape" style={{ background: `hsl(${index * 48 + 165} 55% 48%)` }} />
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+
+  const LibraryView = () => (
+    <div className="page library-page page-enter" key="library">
+      <div className="library-header">
+        <div><p className="eyebrow">Your collection</p><h1>Music library</h1></div>
+        <div className="library-actions">
+          <button onClick={() => fileRef.current?.click()}><Upload size={17} /> Import audio</button>
+          <button onClick={() => setCreateOpen(true)}><Plus size={17} /> New playlist</button>
+        </div>
+      </div>
+      <button className="downloads-link" onClick={() => navigate("downloads")}><Download size={17} /> Downloads <span>{store.downloads.length}</span></button>
+      <section className="content-section">
+        <div className="section-heading"><h2>Playlists</h2></div>
+        <div className="playlist-grid">
+          {store.playlists.map((playlist) => (
+            <article className="playlist-card" key={playlist.id}>
+              <button className="playlist-cover" onClick={() => navigate("playlist", playlist.id)} aria-label={`Open ${playlist.name}`}>
+                <span><ListMusic size={28} /></span>
+              </button>
+              <button onClick={() => navigate("playlist", playlist.id)}><strong>{playlist.name}</strong><small>{playlist.trackIds.length} tracks</small></button>
+              <button className={`icon-button ${store.likedPlaylistIds.includes(playlist.id) ? "active" : ""}`} onClick={() => store.togglePlaylistLike(playlist.id)} aria-label="Like playlist"><Heart size={16} fill={store.likedPlaylistIds.includes(playlist.id) ? "currentColor" : "none"} /></button>
+            </article>
+          ))}
+        </div>
+        {!store.playlists.length && <div className="empty-state"><ListMusic size={26} /><h3>Your playlists will show up here</h3><p>Create a playlist and add music from search or discovery.</p></div>}
+      </section>
+      <section className="content-section">
+        <div className="section-heading"><h2>Saved albums</h2></div>
+        <div className="playlist-grid">
+          {store.savedAlbumIds.map((albumName) => {
+            const albumTrack = store.tracks.find((track) => track.album === albumName);
+            return albumTrack ? <button className="music-card saved-album-card" key={albumName} onClick={() => navigate("album", albumName)}>
+              <Artwork track={albumTrack} /><strong>{albumName}</strong><small>{albumTrack.artist}</small>
+            </button> : null;
+          })}
+        </div>
+        {!store.savedAlbumIds.length && <p className="catalogue-status">Save an album from its page to keep it here.</p>}
+      </section>
+      <section className="content-section">
+        <div className="section-heading"><h2>Followed artists</h2></div>
+        <div className="search-history">
+          {store.followedArtistIds.map((artist) => <button key={artist} onClick={() => navigate("artist", artist)}>{artist}</button>)}
+          {!store.followedArtistIds.length && <span>Follow an artist from their page to see them here.</span>}
+        </div>
+      </section>
+      <section className="content-section">
+        <div className="section-heading"><h2>Saved tracks</h2></div>
+        {store.tracks.filter((track) => store.favouriteIds.includes(track.id)).map((track) => <TrackRow key={track.id} track={track} />)}
+        {!store.favouriteIds.length && <div className="empty-state"><Heart size={26} /><h3>No saved tracks yet</h3><p>Use the heart control beside a track to save it.</p></div>}
+      </section>
+      <section className="content-section">
+        <div className="section-heading"><h2>Recently played</h2></div>
+        {recentTracks.map((track) => <TrackRow key={track.id} track={track} />)}
+        {!recentTracks.length && <p className="catalogue-status">Tracks you play will appear here.</p>}
+      </section>
+      <section className="content-section">
+        <div className="section-heading"><h2>Your favourite genres</h2></div>
+        <div className="search-history">
+          {[...new Set(store.tracks.filter((track) => store.favouriteIds.includes(track.id)).flatMap((track) => track.genre.split(",").map((genre) => genre.trim())).filter(Boolean))].map((genre) => (
+            <button key={genre} onClick={() => { setSearchFilter("Genres"); setQuery(genre); navigate("search"); }}>{genre}</button>
+          ))}
+          {!store.favouriteIds.length && <span>Like songs to build your genre mix.</span>}
+        </div>
+      </section>
+    </div>
+  );
+
+  const DownloadsView = () => (
+    <div className="page downloads-page page-enter" key="downloads">
+      <div className="library-header">
+        <div><p className="eyebrow">Available without internet</p><h1>Downloads</h1></div>
+        <div className={`connection-status ${online ? "online" : "offline"}`} role="status">
+          {online ? <Wifi size={16} /> : <WifiOff size={16} />}{online ? "Online" : "Offline"}
+        </div>
+      </div>
+      <div className="storage-card">
+        <HardDrive size={19} />
+        <div><strong>{store.downloads.length} offline track{store.downloads.length === 1 ? "" : "s"}</strong><small>{(store.storageUsage / (1024 * 1024)).toFixed(1)} MB stored in this browser</small></div>
+      </div>
+      {store.storageError && <p className="catalogue-error" role="alert">{store.storageError}</p>}
+      <p className="offline-note">Only provider-approved downloads and audio you import are saved here. Stream links are never treated as download permission.</p>
+      <section className="content-section">
+        <div className="section-heading"><h2>Downloaded music</h2></div>
+        {store.downloads.map((track, index) => <TrackRow key={track.id} track={track} index={index} />)}
+        {!store.downloads.length && <div className="empty-state"><Download size={28} /><h3>No offline music yet</h3><p>Download a track when its provider explicitly permits it, or import your own audio.</p></div>}
+      </section>
+    </div>
+  );
+
+  const ArtistView = () => {
+    const artistTracks = store.tracks.filter((track) => track.artist === selectedId);
+    const artist = artistTracks[0];
+    if (!artist) return <div className="empty-state"><h3>Artist unavailable</h3></div>;
+    const albums = [...new Set(artistTracks.map((track) => track.album))];
+    const totalDuration = artistTracks.reduce((total, track) => total + (track.duration || 0), 0);
+    return (
+      <div className="page detail-page page-enter" key={`artist-${selectedId}`}>
+        <section className="detail-hero artist-hero" style={{ "--accent": artist.accent } as React.CSSProperties}>
+          <button className="back-button" onClick={() => navigateHistory(-1)} aria-label="Go back"><ArrowLeft size={18} /></button>
+          <Artwork track={artist} size="hero" className="artist-artwork" />
+          <div><p className="eyebrow">Artist</p><h1>{artist.artist}</h1>
+            <p>{artistTracks.length} track{artistTracks.length === 1 ? "" : "s"} · {albums.length} album{albums.length === 1 ? "" : "s"} · {formatTime(totalDuration)} total</p>
+            <div className="detail-actions">
+              <button className="primary-button" onClick={() => artistTracks[0] && playTrack(artistTracks[0], artistTracks)}><Play size={18} fill="currentColor" /> Play</button>
+              <button className="secondary-button" onClick={() => { store.setShuffle(true); artistTracks[0] && playTrack(artistTracks[Math.floor(Math.random() * artistTracks.length)], artistTracks); }}>
+                <Shuffle size={16} /> Shuffle
+              </button>
+              <button className={`secondary-button ${store.followedArtistIds.includes(artist.artist) ? "active" : ""}`} onClick={() => store.toggleFollowedArtist(artist.artist)}>
+                {store.followedArtistIds.includes(artist.artist) ? "Following" : "Follow artist"}
+              </button>
+            </div>
+          </div>
+        </section>
+        <section className="content-section"><div className="section-heading"><h2>Popular tracks</h2></div>{artistTracks.map((track, index) => <TrackRow key={track.id} track={track} index={index} collection={artistTracks} />)}</section>
+        {albums.length > 1 && (
+          <section className="content-section">
+            <div className="section-heading"><h2>Albums & singles</h2></div>
+            <div className="card-grid">
+              {albums.map((albumName) => {
+                const albumTrack = artistTracks.find((track) => track.album === albumName);
+                return albumTrack ? (
+                  <article className="music-card" key={albumName}>
+                    <button className="cover-button" onClick={() => navigate("album", albumName)} aria-label={`Open ${albumName}`}>
+                      <Artwork track={albumTrack} />
+                    </button>
+                    <button className="card-copy" onClick={() => navigate("album", albumName)}>
+                      <strong>{albumName}</strong>
+                      <small>{artistTracks.filter((track) => track.album === albumName).length} tracks</small>
+                    </button>
+                  </article>
+                ) : null;
+              })}
+            </div>
+          </section>
+        )}
+      </div>
+    );
+  };
+
+  const AlbumView = () => {
+    const albumTracks = store.tracks.filter((track) => track.album === selectedId);
+    const album = albumTracks[0];
+    if (!album) return <div className="empty-state"><h3>Album unavailable</h3></div>;
+    const totalDuration = albumTracks.reduce((total, track) => total + (track.duration || 0), 0);
+    const releaseYear = albumTracks.find((track) => track.releaseDate)?.releaseDate?.slice(0, 4);
+    const downloadableCount = albumTracks.filter((track) => track.downloadUrl).length;
+    return (
+      <div className="page detail-page page-enter" key={`album-${selectedId}`}>
+        <section className="detail-hero" style={{ "--accent": album.accent } as React.CSSProperties}>
+          <button className="back-button" onClick={() => navigateHistory(-1)} aria-label="Go back"><ArrowLeft size={18} /></button>
+          <Artwork track={album} size="hero" />
+          <div><p className="eyebrow">Album</p><h1>{album.album}</h1>
+            <p>By <button className="text-link" onClick={() => navigate("artist", album.artist)}>{album.artist}</button>{releaseYear ? ` · ${releaseYear}` : ""} · {albumTracks.length} track{albumTracks.length === 1 ? "" : "s"} · {formatTime(totalDuration)}</p>
+            {album.genre && <p className="hero-genre"><span className="card-badge">{album.genre}</span>{downloadableCount > 0 && <span className="card-badge offline">{downloadableCount} downloadable</span>}{album.providerId !== "sample" && <span className="card-badge">via {album.providerName}</span>}</p>}
+            <div className="detail-actions">
+              <button className="primary-button" onClick={() => albumTracks[0] && playTrack(albumTracks[0], albumTracks)}><Play size={18} fill="currentColor" /> Play</button>
+              <button className="secondary-button" onClick={() => { store.setShuffle(true); albumTracks[0] && playTrack(albumTracks[Math.floor(Math.random() * albumTracks.length)], albumTracks); }}>
+                <Shuffle size={16} /> Shuffle
+              </button>
+              <button className={`secondary-button ${store.savedAlbumIds.includes(album.album) ? "active" : ""}`} onClick={() => store.toggleSavedAlbum(album.album)}>
+                {store.savedAlbumIds.includes(album.album) ? "Saved album" : "Save album"}
+              </button>
+            </div>
+          </div>
+        </section>
+        <section className="content-section"><div className="section-heading"><h2>Track listing</h2><small>{formatTime(totalDuration)}</small></div>{albumTracks.map((track, index) => <TrackRow key={track.id} track={track} index={index} collection={albumTracks} />)}</section>
+      </div>
+    );
+  };
+
+  const PlaylistView = () => {
+    const playlist = store.playlists.find((item) => item.id === selectedId);
+    if (!playlist) return <div className="empty-state"><h3>Playlist unavailable</h3></div>;
+    const tracks = playlist.trackIds.map((id) => store.tracks.find((track) => track.id === id)).filter((track): track is Track => Boolean(track));
+    return (
+      <div className="page detail-page page-enter" key={`playlist-${selectedId}`}>
+        <section className="detail-hero playlist-hero" style={{ "--accent": "#86c9a5" } as React.CSSProperties}>
+          <button className="back-button" onClick={() => navigate("library")} aria-label="Go back"><ArrowLeft size={18} /></button>
+          <div className="playlist-art"><ListMusic size={48} /></div>
+          <div>
+            <p className="eyebrow">Playlist</p>
+            <h1 contentEditable suppressContentEditableWarning onBlur={(event) => store.renamePlaylist(playlist.id, event.currentTarget.textContent ?? "")}>{playlist.name}</h1>
+            <p>{playlist.description}</p>
+            <div className="detail-actions">
+              {tracks[0] && <button className="primary-button" onClick={() => playTrack(tracks[0], tracks)}><Play size={18} fill="currentColor" /> Play</button>}
+              <button className="secondary-button" onClick={() => store.deletePlaylist(playlist.id)}><Trash2 size={16} /> Delete</button>
+            </div>
+          </div>
+        </section>
+        <section className="content-section">
+          <div className="section-heading"><h2>Tracks</h2></div>
+          {tracks.map((track, index) => <TrackRow key={track.id} track={track} index={index} playlistId={playlist.id} collection={tracks} />)}
+          {!tracks.length && <div className="empty-state"><ListMusic size={28} /><h3>This playlist is empty</h3><p>Add tracks using the queue/add control from search or home.</p></div>}
+        </section>
+      </div>
+    );
+  };
+
+  const content = view === "home" ? <HomeView />
+    : view === "search" ? <SearchView />
+    : view === "library" ? <LibraryView />
+    : view === "downloads" ? <DownloadsView />
+    : view === "artist" ? <ArtistView />
+    : view === "album" ? <AlbumView />
+    : <PlaylistView />;
+
+  return (
+    <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+      <aside className="sidebar">
+        <button className="brand" onClick={() => navigate("home")} aria-label="Aural home">
+          <span className="brand-mark"><span /><span /><span /></span>
+          <strong>Aural</strong>
+        </button>
+        <nav className="primary-nav" aria-label="Primary">
+          <button className={view === "home" ? "active" : ""} onClick={() => navigate("home")} aria-label="Home"><Home size={19} /> <span>Home</span></button>
+          <button className={view === "search" ? "active" : ""} onClick={() => navigate("search")} aria-label="Search"><Search size={19} /> <span>Search</span></button>
+          <button className={view === "library" ? "active" : ""} onClick={() => navigate("library")} aria-label="Your library"><Library size={19} /> <span>Your library</span></button>
+          <button className={view === "downloads" ? "active" : ""} onClick={() => navigate("downloads")} aria-label="Downloads"><Download size={19} /> <span>Downloads</span></button>
+        </nav>
+        <div className="sidebar-section">
+          <div className="sidebar-heading"><span>Playlists</span><button onClick={() => setCreateOpen(true)} aria-label="Create playlist"><Plus size={17} /></button></div>
+          {store.playlists.map((playlist) => (
+            <button key={playlist.id} className={view === "playlist" && selectedId === playlist.id ? "active" : ""} onClick={() => navigate("playlist", playlist.id)}>
+              <span className="playlist-dot" />{playlist.name}
+            </button>
+          ))}
+          {!store.playlists.length && <div className="sidebar-heading"><span>None yet</span></div>}
+        </div>
+        <div className="sidebar-footer">
+          <button className="import-button" onClick={() => fileRef.current?.click()}><Upload size={16} /> Import audio</button>
+          <button className="collapse-button" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}>
+            {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <><PanelLeftClose size={16} /> Collapse</>}
+          </button>
+        </div>
+      </aside>
+
+      <main className="main-stage">
+        <header className="topbar">
+          <div className="history-buttons"><button onClick={() => navigateHistory(-1)} disabled={historyIndex === 0} aria-label="Back"><ArrowLeft size={17} /></button><button onClick={() => navigateHistory(1)} disabled={historyIndex >= history.length - 1} aria-label="Forward"><ArrowRight size={17} /></button></div>
+          {view === "search" && <div className="top-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search" /></div>}
+          <span className={`connection-status top-connection ${online ? "online" : "offline"}`} role="status" title={online ? "Connected" : "Offline"}>
+            {online ? <Wifi size={15} /> : <WifiOff size={15} />}{online ? "Online" : "Offline"}
+          </span>
+          <button className="profile-chip" aria-label="Open local library profile" title="Local profile" onClick={() => navigate("library")}><UserRound size={17} /></button>
+        </header>
+        {content}
+        {importMessage && <div className="toast global-toast" role="status">{importMessage}</div>}
+        {store.storageError && view !== "downloads" && <p className="catalogue-error storage-error" role="alert">{store.storageError}</p>}
+      </main>
+
+      <footer className="player" aria-label="Music player">
+        <div className="now-playing">
+          <Artwork track={current} size="small" />
+          <div><strong>{current.title}</strong><button onClick={() => navigate("artist", current.artist)}>{current.artist}{current.providerId === "sample" ? " · Sample preview" : ""}</button></div>
+          <button className={`icon-button ${store.favouriteIds.includes(current.id) ? "active" : ""}`} onClick={() => store.toggleFavourite(current.id)} aria-label="Favourite current track"><Heart size={17} fill={store.favouriteIds.includes(current.id) ? "currentColor" : "none"} /></button>
+          <button className="icon-button expand-button" onClick={() => setExpandedPlayer(true)} aria-label="Expand player" title="Expand"><ChevronsUp size={16} /></button>
+        </div>
+        <div className="player-center">
+          <div className="player-controls">
+            <button className={store.shuffle ? "active" : ""} onClick={() => store.setShuffle(!store.shuffle)} aria-label="Shuffle"><Shuffle size={16} /></button>
+            <button onClick={playPrevious} aria-label="Previous track"><SkipBack size={18} fill="currentColor" /></button>
+            <button className="play-button" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"}>{isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}</button>
+            <button onClick={playNext} aria-label="Next track"><SkipForward size={18} fill="currentColor" /></button>
+            <button className={store.repeat !== "off" ? "active" : ""} onClick={() => store.setRepeat(store.repeat === "off" ? "all" : store.repeat === "all" ? "one" : "off")} aria-label={`Repeat mode: ${store.repeat}`} title={`Repeat ${store.repeat}`}>
+              {store.repeat === "one" ? <Repeat1 size={16} /> : <Repeat2 size={16} />}
+            </button>
+          </div>
+          <div className="progress-row">
+            <span>{formatTime(currentTime)}</span>
+            <input
+              type="range"
+              min="0"
+              max={duration || current.duration || 0}
+              value={Math.min(currentTime, duration || current.duration || 0)}
+              style={{ "--fill": `${duration ? Math.min(100, (currentTime / (duration || current.duration || 1)) * 100) : 0}%` } as React.CSSProperties}
+              onChange={(event) => {
+                const value = Number(event.target.value);
+                setCurrentTime(value);
+                if (audioRef.current) audioRef.current.currentTime = value;
+              }}
+              aria-label="Playback position"
+            />
+            <span>{formatTime(duration || current.duration)}</span>
+          </div>
+          {playbackError && <p className="playback-error" role="alert">{playbackError}</p>}
+        </div>
+        <div className="player-tools">
+          <button className={crossfadeEnabled ? "active" : ""} onClick={() => setCrossfadeEnabled(!crossfadeEnabled)} aria-label="Crossfade" aria-pressed={crossfadeEnabled} title="Crossfade between tracks"><ArrowLeftRight size={17} /></button>
+          <button className={queueOpen ? "active" : ""} onClick={() => setQueueOpen(true)} aria-label="Open queue"><ListMusic size={18} /></button>
+          <button onClick={() => store.setVolume(store.volume ? 0 : 0.72)} aria-label={store.volume ? "Mute" : "Unmute"}>{store.volume ? <Volume2 size={18} /> : <VolumeX size={18} />}</button>
+          <input type="range" min="0" max="1" step="0.01" value={store.volume} style={{ "--fill": `${store.volume * 100}%` } as React.CSSProperties} onChange={(event) => store.setVolume(Number(event.target.value))} aria-label="Volume" />
+        </div>
+      </footer>
+
+      <audio
+        ref={audioRef}
+        src={current.streamUrl}
+        onPlay={() => { setIsPlaying(true); setPlaybackError(""); }}
+        onPause={() => setIsPlaying(false)}
+        onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+        onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)}
+        onError={() => {
+          setIsPlaying(false);
+          setPlaybackError(online ? "This audio could not be loaded." : "This track is not downloaded for offline playback.");
+        }}
+        onEnded={handleEnded}
+      />
+
+      {expandedPlayer && (
+        <div
+          className="now-playing-overlay"
+          style={{ "--accent": current.accent } as React.CSSProperties}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Now playing"
+          onKeyDown={(event) => { if (event.key === "Escape") setExpandedPlayer(false); }}
+          onClick={(event) => { if (event.target === event.currentTarget) setExpandedPlayer(false); }}
+        >
+          <button className="icon-button np-fav" onClick={() => store.toggleFavourite(current.id)} aria-label="Favourite current track">
+            <Heart size={20} fill={store.favouriteIds.includes(current.id) ? "currentColor" : "none"} />
+          </button>
+          <button
+            className={`icon-button np-crt ${crtVisualizer ? "active" : ""}`}
+            onClick={() => setCrtVisualizer(!crtVisualizer)}
+            aria-label="CRT visualizer"
+            aria-pressed={crtVisualizer}
+            title="CRT visualizer"
+          ><Radio size={20} /></button>
+          <button className="icon-button np-close" onClick={() => setExpandedPlayer(false)} aria-label="Close player" autoFocus><X size={20} /></button>
+          <div className="now-playing-view">
+            <div className="np-artwork-frame">
+              {crtVisualizer && (
+                <span className="np-crt-layer" aria-hidden="true">
+                  <CRTWarp
+                    color="#b8ef72"
+                    backgroundColor="#10140f"
+                    speed={0.3}
+                    waveAmplitude={0.14}
+                    waveFrequency={1.8}
+                    levels={3}
+                    columns={88}
+                    persistence={0.4}
+                    curvature={0.14}
+                    scanlineStrength={0.4}
+                    scanlineFrequency={240}
+                    mask="aperture"
+                    maskStrength={0.25}
+                    bloom={1.2}
+                    noise={0.05}
+                    flicker={0.07}
+                    interference={0.08}
+                    vignette={0.45}
+                    rgbShift={0.002}
+                    brightness={0.6}
+                    dpr={1.25}
+                    fps={40}
+                  />
+                </span>
+              )}
+              <Artwork track={current} size="hero" />
+            </div>
+            <div className="np-meta">
+              <strong>{current.title}</strong>
+              <button onClick={() => { setExpandedPlayer(false); navigate("artist", current.artist); }}>{current.artist}</button>
+            </div>
+            <div className="progress-row">
+              <span>{formatTime(currentTime)}</span>
+              <input
+                type="range"
+                min="0"
+                max={duration || current.duration || 0}
+                value={Math.min(currentTime, duration || current.duration || 0)}
+                style={{ "--fill": `${duration ? Math.min(100, (currentTime / (duration || current.duration || 1)) * 100) : 0}%` } as React.CSSProperties}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  setCurrentTime(value);
+                  if (audioRef.current) audioRef.current.currentTime = value;
+                }}
+                aria-label="Playback position"
+              />
+              <span>{formatTime(duration || current.duration)}</span>
+            </div>
+            <div className="player-controls">
+              <button className={store.shuffle ? "active" : ""} onClick={() => store.setShuffle(!store.shuffle)} aria-label="Shuffle"><Shuffle size={18} /></button>
+              <button onClick={playPrevious} aria-label="Previous track"><SkipBack size={22} fill="currentColor" /></button>
+              <button className="play-button" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"}>{isPlaying ? <Pause size={22} fill="currentColor" /> : <Play size={22} fill="currentColor" />}</button>
+              <button onClick={playNext} aria-label="Next track"><SkipForward size={22} fill="currentColor" /></button>
+              <button className={store.repeat !== "off" ? "active" : ""} onClick={() => store.setRepeat(store.repeat === "off" ? "all" : store.repeat === "all" ? "one" : "off")} aria-label={`Repeat mode: ${store.repeat}`}>
+                {store.repeat === "one" ? <Repeat1 size={18} /> : <Repeat2 size={18} />}
+              </button>
+            </div>
+            <button className="secondary-button" onClick={() => { setExpandedPlayer(false); setQueueOpen(true); }}><ListMusic size={16} /> Open queue</button>
+          </div>
+        </div>
+      )}
+
+      <input ref={fileRef} className="hidden-input" type="file" accept="audio/*" multiple onChange={handleImport} />
+
+      {createOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCreateOpen(false); }}>
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="create-title">
+            <button className="modal-close" onClick={() => setCreateOpen(false)} aria-label="Close"><X size={18} /></button>
+            <h2 id="create-title">Create a playlist</h2>
+            <p>Give this collection a name.</p>
+            <input autoFocus value={playlistName} onChange={(event) => setPlaylistName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") createPlaylist(); }} placeholder="Playlist name" />
+            <button className="primary-button" onClick={createPlaylist} disabled={!playlistName.trim()}><Plus size={17} /> Create playlist</button>
+          </div>
+        </div>
+      )}
+
+      {addTrackId && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAddTrackId(""); }}>
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="add-title">
+            <button className="modal-close" onClick={() => setAddTrackId("")} aria-label="Close"><X size={18} /></button>
+            <h2 id="add-title">Add to playlist</h2>
+            <p>Choose a playlist for this track.</p>
+            {store.playlists.map((playlist) => (
+              <button key={playlist.id} className="secondary-button" onClick={() => { store.addToPlaylist(playlist.id, addTrackId); setAddTrackId(""); }}>
+                <ListMusic size={16} /> {playlist.name}
+              </button>
+            ))}
+            {!store.playlists.length && <p>No playlists yet. Create one from the library.</p>}
+          </div>
+        </div>
+      )}
+
+      {queueOpen && (
+        <aside className="queue-panel" aria-label="Queue">
+          <header><div><p className="eyebrow">Now next</p><h2>Queue</h2></div><button className="icon-button" onClick={() => setQueueOpen(false)} aria-label="Close queue"><X size={18} /></button></header>
+          <div className="queue-list">
+            {current && (
+              <div className="queue-item now-playing-item" aria-current="true">
+                <Artwork track={current} size="small" />
+                <div className="queue-item-copy"><strong>{current.title}</strong><small>{current.artist} · Now playing</small></div>
+                {isPlaying && <span className="queue-equalizer" aria-hidden="true"><span /><span /><span /></span>}
+              </div>
+            )}
+            {queueTracks.length > 0 && <p className="queue-section-label">Up next</p>}
+            {queueTracks.map((track, index) => (
+              <div className="queue-item" key={track.id}>
+                <span className="queue-index">{index + 1}</span>
+                <Artwork track={track} size="small" />
+                <button className="queue-item-copy" onClick={() => playTrack(track)}><strong>{track.title}</strong><small>{track.artist}</small></button>
+                <div className="queue-reorder">
+                  <button className="icon-button" disabled={index === 0} onClick={() => store.setQueue(store.queueIds.map((id, i, arr) => i === index ? arr[index - 1] : i === index - 1 ? arr[index] : id))} aria-label={`Move ${track.title} up in queue`}><ChevronUp size={13} /></button>
+                  <button className="icon-button" disabled={index === queueTracks.length - 1} onClick={() => store.setQueue(store.queueIds.map((id, i, arr) => i === index ? arr[index + 1] : i === index + 1 ? arr[index] : id))} aria-label={`Move ${track.title} down in queue`}><ChevronDown size={13} /></button>
+                </div>
+                <button className="icon-button" onClick={() => store.setQueue(store.queueIds.filter((id) => id !== track.id))} aria-label={`Remove ${track.title} from queue`}><Trash2 size={15} /></button>
+              </div>
+            ))}
+            {!queueTracks.length && <div className="empty-state"><ListMusic size={24} /><h3>Queue is empty</h3><p>Play something, or add tracks from search to build a listening line-up.</p></div>}
+          </div>
+          {queueTracks.length > 0 && <button className="secondary-button" onClick={() => store.setQueue([])}>Clear queue</button>}
+        </aside>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <StoreProvider>
+      <AuralApp />
+    </StoreProvider>
+  );
+}

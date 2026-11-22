@@ -1,0 +1,563 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import {
+  formatBytes,
+  getOfflineUsage,
+  listOfflineTracks,
+  removeOfflineTrack,
+  saveOfflineTrack,
+} from "./offline";
+import { fetchTrackAudio } from "./music/services/downloadService";
+import { sampleTracks } from "./music/providers/sample";
+import { setLocalTracks } from "./music/providers";
+import { GENRE_CATEGORIES } from "./music/types/music";
+import type { Playlist, ProviderId, RepeatMode, Track } from "./types";
+import { PROVIDER_ACCENTS, PROVIDER_NAMES } from "./music/types/music";
+
+const STORAGE_KEYS = {
+  catalogue: "aural-catalogue",
+  playlists: "aural-playlists",
+  favourites: "aural-favourites",
+  recent: "aural-recent",
+  likedPlaylists: "aural-liked-playlists",
+  savedAlbums: "aural-saved-albums",
+  followedArtists: "aural-followed-artists",
+} as const;
+
+/** How many catalogue tracks stay cached locally (metadata only). */
+const CATALOGUE_LIMIT = 600;
+const RECENT_LIMIT = 30;
+
+function getSaved<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function save(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // A full or blocked storage API must not break the app.
+  }
+}
+
+type StoredTrack = Partial<Track> & { src?: string; provider?: string; id: string };
+
+/**
+ * Tracks cached by an earlier version of the app used `src` and a provider
+ * label instead of the normalised model. Upgrading them in place keeps a
+ * listener's favourites, playlists and recent plays working.
+ */
+function migrateTrack(stored: StoredTrack): Track | null {
+  if (!stored || typeof stored.id !== "string" || typeof stored.title !== "string") return null;
+  const legacyProvider = stored.provider === "Audius" ? "audius" : stored.provider === "Jamendo" ? "jamendo" : stored.provider === "Local" ? "local" : "sample";
+  const providerId: ProviderId = stored.providerId ?? legacyProvider;
+  const providerTrackId = stored.providerTrackId ?? stored.id.replace(/^(audius|jamendo|sample|local)-/, "");
+  const streamUrl = stored.streamUrl ?? stored.src ?? "";
+  const id = stored.id.startsWith(`${providerId}-`) || providerId === "local" ? stored.id : `${providerId}-${stored.id}`;
+  return {
+    id,
+    providerId,
+    providerName: stored.providerName ?? PROVIDER_NAMES[providerId],
+    providerTrackId,
+    title: stored.title,
+    artist: stored.artist ?? "Unknown artist",
+    ...(stored.artistId ? { artistId: stored.artistId } : {}),
+    album: stored.album ?? "Single",
+    ...(stored.albumId ? { albumId: stored.albumId } : {}),
+    artwork: stored.artwork ?? "",
+    artworkSmall: stored.artworkSmall ?? stored.artwork ?? "",
+    duration: typeof stored.duration === "number" ? stored.duration : 0,
+    streamUrl,
+    ...(stored.downloadUrl ? { downloadUrl: stored.downloadUrl } : {}),
+    genre: stored.genre ?? "Other",
+    tags: Array.isArray(stored.tags) ? stored.tags : [],
+    licensing: stored.licensing ?? {
+      name: providerId === "audius" ? "Audius track licence" : providerId === "jamendo" ? "Creative Commons" : "Local file",
+      streamingAllowed: true,
+      downloadAllowed: Boolean(stored.downloadUrl),
+    },
+    ...(stored.releaseDate ? { releaseDate: stored.releaseDate } : {}),
+    ...(stored.permalink ? { permalink: stored.permalink } : {}),
+    accent: stored.accent ?? PROVIDER_ACCENTS[providerId],
+    ...(stored.imported ? { imported: true } : {}),
+  };
+}
+
+type Store = {
+  /** Every track the app can currently resolve by id. */
+  tracks: Track[];
+  catalogueTracks: Track[];
+  downloads: Track[];
+  downloadProgress: Record<string, number>;
+  downloadingIds: string[];
+  storageUsage: number;
+  storageUsageLabel: string;
+  storageError: string;
+  clearStorageError: () => void;
+  playlists: Playlist[];
+  favouriteIds: string[];
+  recentIds: string[];
+  likedPlaylistIds: string[];
+  savedAlbumIds: string[];
+  followedArtistIds: string[];
+  getTrack: (id: string) => Track | undefined;
+  rememberTracks: (tracks: Track[]) => void;
+  isFavourite: (id: string) => boolean;
+  toggleFavourite: (id: string) => void;
+  createPlaylist: (name: string, trackIds?: string[]) => Playlist;
+  renamePlaylist: (id: string, name: string) => void;
+  describePlaylist: (id: string, description: string) => void;
+  deletePlaylist: (id: string) => void;
+  togglePlaylistLike: (id: string) => void;
+  toggleSavedAlbum: (id: string) => void;
+  toggleFollowedArtist: (id: string) => void;
+  addToPlaylist: (playlistId: string, trackId: string) => void;
+  addTracksToPlaylist: (playlistId: string, trackIds: string[]) => void;
+  removeFromPlaylist: (playlistId: string, trackId: string) => void;
+  shiftPlaylistTrack: (playlistId: string, trackId: string, direction: -1 | 1) => void;
+  reorderPlaylistTrack: (playlistId: string, trackId: string, direction: -1 | 1) => void;
+  movePlaylistTrack: (playlistId: string, fromIndex: number, toIndex: number) => void;
+  addRecent: (id: string) => void;
+  downloadTrack: (id: string) => Promise<boolean>;
+  cancelDownload: (id: string) => void;
+  removeDownload: (id: string) => Promise<void>;
+  importAudio: (files: File[]) => Promise<{ imported: number; skipped: number }>;
+  removeLocalTrack: (id: string) => Promise<void>;
+  volume: number;
+  shuffle: boolean;
+  repeat: RepeatMode;
+  queueIds: string[];
+  setVolume: (value: number) => void;
+  setShuffle: (value: boolean) => void;
+  setRepeat: (value: RepeatMode) => void;
+  setQueue: (ids: string[]) => void;
+  addCatalogueTracks: (tracks: Track[]) => void;
+};
+
+const StoreContext = createContext<Store | null>(null);
+
+function messageFrom(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+const AUDIO_EXTENSIONS = [".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".webm"];
+
+function isAudioFile(file: File): boolean {
+  if (file.type.startsWith("audio/")) return true;
+  const name = file.name.toLowerCase();
+  return AUDIO_EXTENSIONS.some((extension) => name.endsWith(extension));
+}
+
+/** "Artist - Title" filenames are split; anything else becomes the title. */
+function parseFileName(name: string): { title: string; artist: string } {
+  const withoutExtension = name.replace(/\.[^./\\]+$/, "").replace(/[_]+/g, " ").trim();
+  const separator = withoutExtension.indexOf(" - ");
+  if (separator > 0) {
+    return {
+      artist: withoutExtension.slice(0, separator).trim() || "Local library",
+      title: withoutExtension.slice(separator + 3).trim() || withoutExtension,
+    };
+  }
+  return { title: withoutExtension || "Imported track", artist: "Local library" };
+}
+
+export function StoreProvider({ children }: { children: ReactNode }) {
+  const [catalogueTracks, setCatalogueTracks] = useState<Track[]>(() => {
+    const stored = getSaved<StoredTrack[]>(STORAGE_KEYS.catalogue, []);
+    return stored.map(migrateTrack).filter((track): track is Track => track !== null);
+  });
+  const [offlineTracks, setOfflineTracks] = useState<Track[]>([]);
+  const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
+  const [storageUsage, setStorageUsage] = useState(0);
+  const [storageError, setStorageError] = useState("");
+  const [playlists, setPlaylists] = useState<Playlist[]>(() => {
+    const stored = getSaved<Playlist[]>(STORAGE_KEYS.playlists, []);
+    return stored
+      .filter((playlist) => playlist && typeof playlist.id === "string" && Array.isArray(playlist.trackIds))
+      .map((playlist) => ({
+        id: playlist.id,
+        name: playlist.name || "Untitled playlist",
+        description: playlist.description || "Your playlist",
+        trackIds: playlist.trackIds.filter((id): id is string => typeof id === "string"),
+        createdAt: playlist.createdAt ?? Date.now(),
+        updatedAt: playlist.updatedAt ?? Date.now(),
+      }));
+  });
+  const [favouriteIds, setFavouriteIds] = useState<string[]>(() => getSaved<string[]>(STORAGE_KEYS.favourites, []));
+  const [recentIds, setRecentIds] = useState<string[]>(() => getSaved<string[]>(STORAGE_KEYS.recent, []));
+  const [likedPlaylistIds, setLikedPlaylistIds] = useState<string[]>(() => getSaved<string[]>(STORAGE_KEYS.likedPlaylists, []));
+  const [savedAlbumIds, setSavedAlbumIds] = useState<string[]>(() => getSaved<string[]>(STORAGE_KEYS.savedAlbums, []));
+  const [followedArtistIds, setFollowedArtistIds] = useState<string[]>(() => getSaved<string[]>(STORAGE_KEYS.followedArtists, []));
+  const controllers = useRef(new Map<string, AbortController>());
+
+  const offlineById = useMemo(() => new Map(offlineTracks.map((track) => [track.id, track])), [offlineTracks]);
+
+  const tracks = useMemo(() => {
+    const merged = new Map<string, Track>();
+    sampleTracks.forEach((track) => merged.set(track.id, track));
+    catalogueTracks.forEach((track) => merged.set(track.id, offlineById.get(track.id) ?? track));
+    offlineTracks.forEach((track) => merged.set(track.id, track));
+    return [...merged.values()];
+  }, [catalogueTracks, offlineById, offlineTracks]);
+
+  const trackIndex = useMemo(() => new Map(tracks.map((track) => [track.id, track])), [tracks]);
+  const getTrack = useCallback((id: string) => trackIndex.get(id), [trackIndex]);
+
+  /** Imported (local) tracks are mirrored into the local provider registry. */
+  useEffect(() => {
+    setLocalTracks(offlineTracks.filter((track) => track.imported));
+  }, [offlineTracks]);
+
+  useEffect(() => {
+    void Promise.all([listOfflineTracks(), getOfflineUsage()])
+      .then(([savedTracks, usage]) => {
+        setOfflineTracks(savedTracks);
+        setStorageUsage(usage);
+      })
+      .catch((error: unknown) => setStorageError(messageFrom(error, "Offline storage is unavailable.")));
+  }, []);
+
+  useEffect(() => save(STORAGE_KEYS.catalogue, catalogueTracks.slice(-CATALOGUE_LIMIT)), [catalogueTracks]);
+  useEffect(() => save(STORAGE_KEYS.playlists, playlists), [playlists]);
+  useEffect(() => save(STORAGE_KEYS.favourites, favouriteIds), [favouriteIds]);
+  useEffect(() => save(STORAGE_KEYS.recent, recentIds), [recentIds]);
+  useEffect(() => save(STORAGE_KEYS.likedPlaylists, likedPlaylistIds), [likedPlaylistIds]);
+  useEffect(() => save(STORAGE_KEYS.savedAlbums, savedAlbumIds), [savedAlbumIds]);
+  useEffect(() => save(STORAGE_KEYS.followedArtists, followedArtistIds), [followedArtistIds]);
+
+  useEffect(() => {
+    const activeControllers = controllers.current;
+    return () => {
+      activeControllers.forEach((controller) => controller.abort());
+      activeControllers.clear();
+    };
+  }, []);
+
+  const [volume, setVolumeState] = useState(() => getSaved("aural-volume", 0.72));
+  const [shuffle, setShuffleState] = useState(() => getSaved("aural-shuffle", false));
+  const [repeat, setRepeatState] = useState<RepeatMode>(() => getSaved("aural-repeat", "off"));
+  const [queueIds, setQueueIds] = useState<string[]>(() => getSaved<string[]>("aural-queue", []));
+
+  useEffect(() => save("aural-volume", volume), [volume]);
+  useEffect(() => save("aural-shuffle", shuffle), [shuffle]);
+  useEffect(() => save("aural-repeat", repeat), [repeat]);
+  useEffect(() => save("aural-queue", queueIds), [queueIds]);
+
+  const setVolume = useCallback((value: number) => {
+    setVolumeState(Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0.72)));
+  }, []);
+
+  const setShuffle = useCallback((value: boolean) => setShuffleState(Boolean(value)), []);
+  const setRepeat = useCallback((value: RepeatMode) => setRepeatState(value), []);
+  const setQueue = useCallback((ids: string[]) => setQueueIds(Array.isArray(ids) ? ids : []), []);
+
+  const [downloads, setDownloads] = useState<Track[]>([]);
+  const refreshDownloads = useCallback(() => {
+    void listOfflineTracks()
+      .then((tracks) => setDownloads(tracks))
+      .catch(() => setStorageError(messageFrom(new Error("Offline storage is unavailable."), "Offline storage is unavailable.")));
+  }, []);
+  useEffect(() => refreshDownloads(), [refreshDownloads]);
+
+  const downloadsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    downloadsRef.current = new Set(downloads.map((track) => track.id));
+  }, [downloads]);
+
+  const addCatalogueTracks = useCallback((incoming: Track[]) => {
+    if (!incoming.length) return;
+    setCatalogueTracks((previous) => {
+      const seen = new Set(previous.map((track) => track.id));
+      const next = [...previous];
+      for (const track of incoming) {
+        if (seen.has(track.id)) continue;
+        seen.add(track.id);
+        next.push(track);
+      }
+      return next.slice(-CATALOGUE_LIMIT);
+    });
+  }, []);
+
+  const rememberTracks = useCallback((incoming: Track[]) => addCatalogueTracks(incoming), [addCatalogueTracks]);
+
+  const isFavourite = useCallback((id: string) => favouriteIds.includes(id), [favouriteIds]);
+
+  const toggleFavourite = useCallback((id: string) => {
+    setFavouriteIds((previous) => previous.includes(id) ? previous.filter((item) => item !== id) : [...previous, id]);
+  }, []);
+
+  const togglePlaylistLike = useCallback((id: string) => {
+    setLikedPlaylistIds((previous) => previous.includes(id) ? previous.filter((item) => item !== id) : [...previous, id]);
+  }, []);
+
+  const toggleSavedAlbum = useCallback((id: string) => {
+    setSavedAlbumIds((previous) => previous.includes(id) ? previous.filter((item) => item !== id) : [...previous, id]);
+  }, []);
+
+  const toggleFollowedArtist = useCallback((id: string) => {
+    setFollowedArtistIds((previous) => previous.includes(id) ? previous.filter((item) => item !== id) : [...previous, id]);
+  }, []);
+
+  const createPlaylist = useCallback((name: string, trackIds: string[] = []): Playlist => {
+    const playlist: Playlist = {
+      id: `pl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      name: name.trim() || "Untitled playlist",
+      description: "Your playlist",
+      trackIds,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    setPlaylists((previous) => [...previous, playlist]);
+    return playlist;
+  }, []);
+
+  const renamePlaylist = useCallback((id: string, name: string) => {
+    const next = name.trim();
+    if (!next) return;
+    setPlaylists((previous) => previous.map((playlist) => playlist.id === id ? { ...playlist, name: next, updatedAt: Date.now() } : playlist));
+  }, []);
+
+  const describePlaylist = useCallback((id: string, description: string) => {
+    setPlaylists((previous) => previous.map((playlist) => playlist.id === id ? { ...playlist, description, updatedAt: Date.now() } : playlist));
+  }, []);
+
+  const deletePlaylist = useCallback((id: string) => {
+    setPlaylists((previous) => previous.filter((playlist) => playlist.id !== id));
+    setLikedPlaylistIds((previous) => previous.filter((item) => item !== id));
+  }, []);
+
+  const addToPlaylist = useCallback((playlistId: string, trackId: string) => {
+    setPlaylists((previous) => previous.map((playlist) => {
+      if (playlist.id !== playlistId || playlist.trackIds.includes(trackId)) return playlist;
+      return { ...playlist, trackIds: [...playlist.trackIds, trackId], updatedAt: Date.now() };
+    }));
+  }, []);
+
+  const addTracksToPlaylist = useCallback((playlistId: string, trackIds: string[]) => {
+    setPlaylists((previous) => previous.map((playlist) => {
+      if (playlist.id !== playlistId) return playlist;
+      const merged = [...playlist.trackIds];
+      for (const id of trackIds) if (!merged.includes(id)) merged.push(id);
+      return { ...playlist, trackIds: merged, updatedAt: Date.now() };
+    }));
+  }, []);
+
+  const removeFromPlaylist = useCallback((playlistId: string, trackId: string) => {
+    setPlaylists((previous) => previous.map((playlist) => playlist.id === playlistId
+      ? { ...playlist, trackIds: playlist.trackIds.filter((id) => id !== trackId), updatedAt: Date.now() }
+      : playlist));
+  }, []);
+
+  const reorderPlaylistTrack = useCallback((playlistId: string, trackId: string, direction: -1 | 1) => {
+    setPlaylists((previous) => previous.map((playlist) => {
+      if (playlist.id !== playlistId) return playlist;
+      const index = playlist.trackIds.indexOf(trackId);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= playlist.trackIds.length) return playlist;
+      const trackIds = [...playlist.trackIds];
+      [trackIds[index], trackIds[target]] = [trackIds[target], trackIds[index]];
+      return { ...playlist, trackIds, updatedAt: Date.now() };
+    }));
+  }, []);
+
+  const movePlaylistTrack = useCallback((playlistId: string, fromIndex: number, toIndex: number) => {
+    setPlaylists((previous) => previous.map((playlist) => {
+      if (playlist.id !== playlistId) return playlist;
+      if (fromIndex < 0 || fromIndex >= playlist.trackIds.length) return playlist;
+      const target = Math.max(0, Math.min(playlist.trackIds.length - 1, toIndex));
+      const trackIds = [...playlist.trackIds];
+      const [moved] = trackIds.splice(fromIndex, 1);
+      trackIds.splice(target, 0, moved);
+      return { ...playlist, trackIds, updatedAt: Date.now() };
+    }));
+  }, []);
+
+  const addRecent = useCallback((id: string) => {
+    setRecentIds((previous) => [id, ...previous.filter((item) => item !== id)].slice(0, RECENT_LIMIT));
+  }, []);
+
+  const downloadTrack = useCallback(async (id: string): Promise<boolean> => {
+    const track = trackIndex.get(id);
+    if (!track) return false;
+    if (!track.downloadUrl || track.licensing.downloadAllowed === false) {
+      setStorageError("This provider has not released this track for download.");
+      return false;
+    }
+    if (controllers.current.has(id)) return false;
+    const controller = new AbortController();
+    controllers.current.set(id, controller);
+    setDownloadProgress((previous) => ({ ...previous, [id]: 0 }));
+    setStorageError("");
+    try {
+      const { blob } = await fetchTrackAudio(track, {
+        signal: controller.signal,
+        onProgress: (percent) => setDownloadProgress((previous) => ({ ...previous, [id]: percent })),
+      });
+      await saveOfflineTrack(track, blob);
+      refreshDownloads();
+      setOfflineTracks((previous) => previous.map((item) => item.id === id ? { ...item, downloaded: true } : item));
+      return true;
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setStorageError("");
+      } else {
+        setStorageError(messageFrom(error, "The download could not be completed."));
+      }
+      return false;
+    } finally {
+      controllers.current.delete(id);
+      setDownloadProgress((previous) => {
+        const next = { ...previous };
+        delete next[id];
+        return next;
+      });
+    }
+  }, [refreshDownloads, trackIndex]);
+
+  const cancelDownload = useCallback((id: string) => {
+    controllers.current.get(id)?.abort();
+    controllers.current.delete(id);
+    setDownloadProgress((previous) => {
+      const next = { ...previous };
+      delete next[id];
+      return next;
+    });
+  }, []);
+
+  const removeDownload = useCallback(async (id: string) => {
+    await removeOfflineTrack(id);
+    refreshDownloads();
+    setOfflineTracks((previous) => previous.filter((item) => item.id !== id));
+  }, [refreshDownloads]);
+
+  const importAudio = useCallback(async (files: File[]): Promise<{ imported: number; skipped: number }> => {
+    let imported = 0;
+    let skipped = 0;
+    for (const file of files) {
+      if (!isAudioFile(file)) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const { title, artist } = parseFileName(file.name);
+        const id = `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        const track: Track = {
+          id,
+          providerId: "local",
+          providerName: PROVIDER_NAMES.local,
+          providerTrackId: id,
+          title,
+          artist,
+          album: "Imported",
+          artwork: "",
+          artworkSmall: "",
+          duration: 0,
+          streamUrl: URL.createObjectURL(file),
+          genre: "Imported",
+          tags: [],
+          licensing: {
+            name: "Your own audio file",
+            streamingAllowed: true,
+            downloadAllowed: true,
+            note: "Imported from your device — stored offline in this browser.",
+          },
+          accent: PROVIDER_ACCENTS.local,
+          imported: true,
+        };
+        await saveOfflineTrack(track, file);
+        imported += 1;
+      } catch {
+        skipped += 1;
+      }
+    }
+    refreshDownloads();
+    return { imported, skipped };
+  }, [refreshDownloads]);
+
+  const removeLocalTrack = useCallback(async (id: string) => {
+    await removeOfflineTrack(id);
+    refreshDownloads();
+  }, [refreshDownloads]);
+
+  const value = useMemo<Store>(() => ({
+    tracks,
+    catalogueTracks,
+    downloads,
+    downloadProgress,
+    downloadingIds: [...controllers.current.keys()],
+    storageUsage,
+    storageUsageLabel: formatBytes(storageUsage),
+    storageError,
+    clearStorageError: () => setStorageError(""),
+    playlists,
+    favouriteIds,
+    recentIds,
+    likedPlaylistIds,
+    savedAlbumIds,
+    followedArtistIds,
+    getTrack,
+    rememberTracks,
+    isFavourite,
+    toggleFavourite,
+    createPlaylist,
+    renamePlaylist,
+    describePlaylist,
+    deletePlaylist,
+    togglePlaylistLike,
+    toggleSavedAlbum,
+    toggleFollowedArtist,
+    addToPlaylist,
+    addTracksToPlaylist,
+    removeFromPlaylist,
+    shiftPlaylistTrack: reorderPlaylistTrack,
+    reorderPlaylistTrack,
+    movePlaylistTrack,
+    addRecent,
+    downloadTrack,
+    cancelDownload,
+    removeDownload,
+    importAudio,
+    removeLocalTrack,
+    volume,
+    shuffle,
+    repeat,
+    queueIds,
+    setVolume,
+    setShuffle,
+    setRepeat,
+    setQueue,
+    addCatalogueTracks,
+  }), [
+    tracks, catalogueTracks, downloads, downloadProgress, storageUsage, storageError,
+    playlists, favouriteIds, recentIds, likedPlaylistIds, savedAlbumIds, followedArtistIds,
+    getTrack, rememberTracks, isFavourite, toggleFavourite, createPlaylist, renamePlaylist,
+    describePlaylist, deletePlaylist, togglePlaylistLike, toggleSavedAlbum, toggleFollowedArtist,
+    addToPlaylist, addTracksToPlaylist, removeFromPlaylist, reorderPlaylistTrack, movePlaylistTrack,
+    addRecent, downloadTrack, cancelDownload, removeDownload, importAudio, removeLocalTrack,
+    volume, shuffle, repeat, queueIds, setVolume, setShuffle, setRepeat, setQueue, addCatalogueTracks,
+  ]);
+
+  return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
+}
+
+export { GENRE_CATEGORIES };
+export type { RepeatMode };
+
+export function useStore(): Store {
+  const context = useContext(StoreContext);
+  if (!context) throw new Error("useStore must be used inside <StoreProvider>.");
+  return context;
+}
