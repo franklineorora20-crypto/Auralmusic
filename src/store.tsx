@@ -15,11 +15,12 @@ import {
   listOfflineTracks,
   removeOfflineTrack,
   saveOfflineTrack,
+  updateOfflineTrackArtwork,
 } from "./offline";
 import { fetchTrackAudio } from "./music/services/downloadService";
 import { sampleTracks } from "./music/providers/sample";
 import { setLocalTracks } from "./music/providers";
-import { extractEmbeddedLyricsFromAudioBytes } from "./music/lib/lyrics";
+import { extractEmbeddedMediaFromAudioBytes, imageBytesToDataUrl } from "./music/lib/mediaMetadata";
 import { GENRE_CATEGORIES } from "./music/types/music";
 import type { Playlist, ProviderId, RepeatMode, Track } from "./types";
 import { PROVIDER_ACCENTS, PROVIDER_NAMES } from "./music/types/music";
@@ -161,6 +162,7 @@ type Store = {
   cancelDownload: (id: string) => void;
   removeDownload: (id: string) => Promise<void>;
   importAudio: (files: File[], targetFolderId?: string | null) => Promise<{ imported: number; skipped: number }>;
+  updateTrackArtwork: (id: string, artwork: string) => Promise<void>;
   removeLocalTrack: (id: string) => Promise<void>;
   volume: number;
   shuffle: boolean;
@@ -592,11 +594,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
       try {
         const parsedName = parseFileName(file.name);
-        const headerBytes = new Uint8Array(await file.slice(0, 512 * 1024).arrayBuffer());
-        const embedded = extractEmbeddedLyricsFromAudioBytes(headerBytes);
+        const headerBytes = new Uint8Array(await file.slice(0, Math.min(file.size, 6 * 1024 * 1024)).arrayBuffer());
+        const embedded = extractEmbeddedMediaFromAudioBytes(headerBytes);
         const title = embedded?.title || parsedName.title;
         const artist = embedded?.artist || parsedName.artist;
         const album = embedded?.album || "Imported";
+        const embeddedArtwork = embedded?.artwork
+          ? imageBytesToDataUrl(embedded.artwork.data, embedded.artwork.mime)
+          : "";
         const lyrics = embedded?.syncedLyrics || embedded?.plainLyrics
           ? {
               ...(embedded.syncedLyrics ? { syncedLyrics: embedded.syncedLyrics } : {}),
@@ -612,8 +617,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           title,
           artist,
           album,
-          artwork: "",
-          artworkSmall: "",
+          artwork: embeddedArtwork,
+          artworkSmall: embeddedArtwork,
           duration: 0,
           streamUrl: URL.createObjectURL(file),
           genre: "Imported",
@@ -648,6 +653,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     await refreshDownloads();
     return { imported, skipped };
   }, [refreshDownloads]);
+
+  const updateTrackArtwork = useCallback(async (id: string, artwork: string) => {
+    setOfflineTracks((previous) =>
+      previous.map((track) => (track.id === id ? { ...track, artwork, artworkSmall: artwork } : track)),
+    );
+    setDownloads((previous) =>
+      previous.map((track) => (track.id === id ? { ...track, artwork, artworkSmall: artwork } : track)),
+    );
+    setCatalogueTracks((previous) =>
+      previous.map((track) => (track.id === id ? { ...track, artwork, artworkSmall: artwork } : track)),
+    );
+    try {
+      await updateOfflineTrackArtwork(id, artwork);
+    } catch (error: unknown) {
+      setStorageError(messageFrom(error, "Could not save cover picture."));
+    }
+  }, []);
 
   const removeLocalTrack = useCallback(async (id: string) => {
     await removeOfflineTrack(id);
@@ -707,6 +729,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     cancelDownload,
     removeDownload,
     importAudio,
+    updateTrackArtwork,
     removeLocalTrack,
     volume,
     shuffle,
@@ -725,7 +748,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     addTrackToFolder, removeTrackFromFolder, moveTrackToFolder,
     togglePlaylistLike, toggleSavedAlbum, toggleFollowedArtist,
     addToPlaylist, addTracksToPlaylist, removeFromPlaylist, reorderPlaylistTrack, movePlaylistTrack,
-    addRecent, downloadTrack, cancelDownload, removeDownload, importAudio, removeLocalTrack,
+    addRecent, downloadTrack, cancelDownload, removeDownload, importAudio, updateTrackArtwork, removeLocalTrack,
     volume, shuffle, repeat, queueIds, setVolume, setShuffle, setRepeat, setQueue, addCatalogueTracks,
   ]);
 

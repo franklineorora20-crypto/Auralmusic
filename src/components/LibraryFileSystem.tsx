@@ -11,6 +11,7 @@ import {
   FolderPlus,
   HardDrive,
   Heart,
+  ImagePlus,
   LayoutGrid,
   List,
   ListMusic,
@@ -23,6 +24,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import { isDisplayableImageUrl } from "../music/lib/mediaMetadata";
 import { formatBytes } from "../offline";
 import { useStore, type LibraryFolder } from "../store";
 import type { Track, View } from "../types";
@@ -68,6 +70,7 @@ interface LibraryFileSystemProps {
   onOpenNewPlaylist: () => void;
   onImportFiles: (files: File[], targetFolderId?: string | null) => void;
   onTriggerImportPicker: (targetFolderId?: string | null) => void;
+  onEditCover?: (track: Track) => void;
   onFolderExitToss?: (label: string) => void;
 }
 
@@ -120,6 +123,7 @@ export default function LibraryFileSystem({
   onOpenNewPlaylist,
   onImportFiles,
   onTriggerImportPicker,
+  onEditCover,
   onFolderExitToss,
 }: LibraryFileSystemProps) {
   const store = useStore();
@@ -782,7 +786,13 @@ export default function LibraryFileSystem({
                           onClick={() => onPlayTrack(track, directoryTracks)}
                         >
                           <span className="fs-file-icon" aria-hidden="true">
-                            {playing ? <Pause size={15} fill="currentColor" /> : <FileAudio size={16} />}
+                            {isDisplayableImageUrl(track.artwork) ? (
+                              <img className="fs-file-thumb" src={track.artwork} alt="" loading="lazy" />
+                            ) : playing ? (
+                              <Pause size={15} fill="currentColor" />
+                            ) : (
+                              <FileAudio size={16} />
+                            )}
                           </span>
                           <span className="fs-file-copy">
                             <strong title={fileName}>{fileName}</strong>
@@ -833,6 +843,17 @@ export default function LibraryFileSystem({
                           >
                             <Plus size={14} />
                           </button>
+                          {onEditCover && (track.imported || track.downloaded) && (
+                            <button
+                              type="button"
+                              className="icon-button"
+                              onClick={() => onEditCover(track)}
+                              aria-label={isDisplayableImageUrl(track.artwork) ? `Change cover for ${track.title}` : `Add cover for ${track.title}`}
+                              title={isDisplayableImageUrl(track.artwork) ? "Change cover picture" : "Add cover picture"}
+                            >
+                              <ImagePlus size={14} />
+                            </button>
+                          )}
                           {location.kind === "custom" && (
                             <button
                               type="button"

@@ -104,6 +104,37 @@ export async function saveOfflineTrack(track: Track, blob: Blob): Promise<void> 
   });
 }
 
+export async function updateOfflineTrackArtwork(id: string, artwork: string): Promise<Track | null> {
+  const db = await openDatabase();
+  return new Promise<Track | null>((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const getReq = store.get(id);
+    let updatedTrack: Track | null = null;
+
+    getReq.onsuccess = () => {
+      const existing = getReq.result as OfflineRecord | undefined;
+      if (!existing) {
+        resolve(null);
+        return;
+      }
+      updatedTrack = {
+        ...existing.track,
+        artwork,
+        artworkSmall: artwork,
+      };
+      store.put({
+        ...existing,
+        track: updatedTrack,
+      });
+    };
+    getReq.onerror = () => reject(getReq.error ?? new Error("Could not read offline track."));
+    transaction.oncomplete = () => resolve(updatedTrack);
+    transaction.onerror = () => reject(transaction.error ?? new Error("Could not update track artwork."));
+    transaction.onabort = () => reject(transaction.error ?? new Error("Updating track artwork was interrupted."));
+  });
+}
+
 export async function removeOfflineTrack(id: string): Promise<void> {
   const db = await openDatabase();
   await new Promise<void>((resolve, reject) => {

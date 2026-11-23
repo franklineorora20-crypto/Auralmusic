@@ -4,14 +4,23 @@ import Ferrofluid from "./components/Ferrofluid";
 import { getCrtPreset } from "./components/crtPresets";
 import {
   ArrowLeft, ArrowLeftRight, ArrowRight, ChevronDown, ChevronUp, Download, HardDrive,
-  Heart, Home, Library, ListMusic, MicVocal, Pause, Play, Plus,
+  Heart, Home, ImagePlus, Library, ListMusic, MicVocal, Pause, Play, Plus,
   Repeat1, Repeat2, Search, Shuffle, SkipBack, SkipForward, Trash2, Upload, Volume2,
   UserRound, VolumeX, Wifi, WifiOff, X, PanelLeftClose, PanelLeftOpen, ChevronsUp, Clock, Radio,
 } from "lucide-react";
+import CoverArtModal from "./components/CoverArtModal";
 import LibraryFileSystem from "./components/LibraryFileSystem";
 import LyricsPanel from "./components/LyricsPanel";
 import { CrumpledAppScreen, PaperTossOverlay, playPaperRustle, type PaperTossItem } from "./components/PaperStage";
 import { OfflineIndicator, PWAInstallButton } from "./components/PWAInstallButton";
+import { isDisplayableImageUrl } from "./music/lib/mediaMetadata";
+import {
+  registerMediaSessionHandlers,
+  syncMediaSessionMetadata,
+  syncMediaSessionPlaybackState,
+  syncMediaSessionPosition,
+} from "./music/lib/mediaSession";
+import { computeNextTrackId, computePreviousTrackId } from "./music/lib/playbackQueue";
 import { useOnlineStatus, usePWAInstall } from "./pwa/usePWAInstall";
 import { StoreProvider, useStore } from "./store";
 import { demoTracks } from "./data";
@@ -28,7 +37,7 @@ const formatTime = (seconds: number) => {
 /** Memoised so time updates in the player don't re-render every visible row. */
 const Artwork = memo(function Artwork({ track, size = "card", className = "" }: { track: Track; size?: "card" | "small" | "hero"; className?: string }) {
   return <div className={`artwork artwork-${size} ${className}`} style={{ background: track.accent }} aria-label={`${track.album} artwork`}>
-    {track.artwork.startsWith("http")
+    {isDisplayableImageUrl(track.artwork)
       ? <img
           src={track.artwork}
           alt=""
@@ -71,6 +80,7 @@ function AuralApp() {
   const [lyricsOpen, setLyricsOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [addTrackId, setAddTrackId] = useState("");
+  const [coverEditTrackId, setCoverEditTrackId] = useState("");
   const [playlistName, setPlaylistName] = useState("");
   const [importMessage, setImportMessage] = useState("");
   const [history, setHistory] = useState<Array<{ view: View; selectedId: string }>>([{ view: "home", selectedId: "" }]);
@@ -289,17 +299,42 @@ function AuralApp() {
       });
   };
 
+  const loadedTrackIdRef = useRef(currentId);
+
   useEffect(() => {
     if (audioRef.current) audioRef.current.volume = store.volume;
   }, [store.volume]);
 
   useEffect(() => {
     if (!audioRef.current) return;
+    if (loadedTrackIdRef.current === currentId) return;
+    loadedTrackIdRef.current = currentId;
     audioRef.current.load();
     if (isPlaying) {
       void audioRef.current.play().catch(() => setIsPlaying(false));
     }
-  }, [currentId]);
+  }, [currentId, isPlaying]);
+
+  const switchToTrack = (trackId: string, autoplay = true) => {
+    const nextTrack = store.tracks.find((track) => track.id === trackId);
+    loadedTrackIdRef.current = trackId;
+    setCurrentId(trackId);
+    store.addRecent(trackId);
+    setCurrentTime(0);
+    setPlaybackError("");
+    if (audioRef.current && nextTrack) {
+      audioRef.current.src = nextTrack.streamUrl;
+      audioRef.current.load();
+      if (autoplay) {
+        setIsPlaying(true);
+        void audioRef.current.play().catch(() => setIsPlaying(false));
+      } else {
+        setIsPlaying(false);
+      }
+    } else {
+      setIsPlaying(autoplay);
+    }
+  };
 
   const playTrack = (track: Track, collection?: Track[]) => {
     if (collection?.length) {
@@ -315,9 +350,7 @@ function AuralApp() {
       }
       setIsPlaying((playing) => !playing);
     } else {
-      setCurrentId(track.id);
-      setCurrentTime(0);
-      setIsPlaying(true);
+      switchToTrack(track.id, true);
     }
     setPlaybackError("");
   };
@@ -333,47 +366,43 @@ function AuralApp() {
   };
 
   const seekToTime = (seconds: number) => {
-    const clamped = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+    const maxDuration = duration || current?.duration || 0;
+    const clamped = Math.max(0, Number.isFinite(seconds) ? (maxDuration > 0 ? Math.min(maxDuration, seconds) : seconds) : 0);
     setCurrentTime(clamped);
     if (audioRef.current) audioRef.current.currentTime = clamped;
+    syncMediaSessionPosition(maxDuration, clamped);
   };
 
   const playNext = () => {
-    if (!store.queueIds.length) return;
-    const index = store.queueIds.indexOf(currentId);
-    let nextIndex = index + 1;
-    if (store.shuffle && store.queueIds.length > 1) {
-      do nextIndex = Math.floor(Math.random() * store.queueIds.length);
-      while (nextIndex === index);
+    const nextId = computeNextTrackId({
+      queueIds: store.queueIds,
+      tracks: store.tracks,
+      currentId,
+      shuffle: store.shuffle,
+      repeat: store.repeat,
+    });
+    if (!nextId) {
+      audioRef.current?.pause();
+      setIsPlaying(false);
+      return;
     }
-    if (nextIndex >= store.queueIds.length) {
-      if (store.repeat !== "all") {
-        audioRef.current?.pause();
-        setIsPlaying(false);
-        return;
-      }
-      nextIndex = 0;
-    }
-    const nextId = store.queueIds[nextIndex];
-    if (nextId) {
-      setCurrentId(nextId);
-      store.addRecent(nextId);
-      setIsPlaying(true);
-    }
+    switchToTrack(nextId, true);
   };
 
   const playPrevious = () => {
-    if (audioRef.current && audioRef.current.currentTime > 4) {
-      audioRef.current.currentTime = 0;
+    const result = computePreviousTrackId({
+      queueIds: store.queueIds,
+      tracks: store.tracks,
+      currentId,
+      repeat: store.repeat,
+      currentTime: audioRef.current?.currentTime ?? currentTime,
+    });
+    if (result.action === "restart") {
+      seekToTime(0);
       return;
     }
-    const index = store.queueIds.indexOf(currentId);
-    if (index <= 0 && store.repeat !== "all") return;
-    const previousId = store.queueIds[(index - 1 + store.queueIds.length) % store.queueIds.length];
-    if (previousId) {
-      setCurrentId(previousId);
-      store.addRecent(previousId);
-      setIsPlaying(true);
+    if (result.action === "switch" && result.trackId) {
+      switchToTrack(result.trackId, true);
     }
   };
 
@@ -385,6 +414,72 @@ function AuralApp() {
       playNext();
     }
   };
+
+  const mediaHandlersRef = useRef({
+    play: () => {
+      if (!audioRef.current) return;
+      void audioRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+    },
+    pause: () => {
+      audioRef.current?.pause();
+      setIsPlaying(false);
+    },
+    next: playNext,
+    previous: playPrevious,
+    seekTo: seekToTime,
+    seekBackward: (offset: number) => seekToTime(Math.max(0, (audioRef.current?.currentTime ?? currentTime) - offset)),
+    seekForward: (offset: number) => seekToTime((audioRef.current?.currentTime ?? currentTime) + offset),
+    stop: () => {
+      audioRef.current?.pause();
+      seekToTime(0);
+      setIsPlaying(false);
+    },
+  });
+  mediaHandlersRef.current = {
+    play: () => {
+      if (!audioRef.current) return;
+      void audioRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+    },
+    pause: () => {
+      audioRef.current?.pause();
+      setIsPlaying(false);
+    },
+    next: playNext,
+    previous: playPrevious,
+    seekTo: seekToTime,
+    seekBackward: (offset: number) => seekToTime(Math.max(0, (audioRef.current?.currentTime ?? currentTime) - offset)),
+    seekForward: (offset: number) => seekToTime((audioRef.current?.currentTime ?? currentTime) + offset),
+    stop: () => {
+      audioRef.current?.pause();
+      seekToTime(0);
+      setIsPlaying(false);
+    },
+  };
+
+  useEffect(() => {
+    return registerMediaSessionHandlers({
+      onPlay: () => mediaHandlersRef.current.play(),
+      onPause: () => mediaHandlersRef.current.pause(),
+      onNextTrack: () => mediaHandlersRef.current.next(),
+      onPreviousTrack: () => mediaHandlersRef.current.previous(),
+      onSeekTo: (seconds) => mediaHandlersRef.current.seekTo(seconds),
+      onSeekBackward: (offset) => mediaHandlersRef.current.seekBackward(offset),
+      onSeekForward: (offset) => mediaHandlersRef.current.seekForward(offset),
+      onStop: () => mediaHandlersRef.current.stop(),
+    });
+  }, []);
+
+  useEffect(() => {
+    syncMediaSessionMetadata(current);
+  }, [current]);
+
+  useEffect(() => {
+    syncMediaSessionPlaybackState(isPlaying);
+  }, [isPlaying]);
+
+  useEffect(() => {
+    syncMediaSessionPosition(duration || current?.duration || 0, currentTime);
+  }, [duration, current?.duration, currentTime]);
 
   const spawnPaperToss = (label: string, origin: PaperTossItem["origin"] = "center", accent = current.accent) => {
     if (typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
@@ -637,24 +732,36 @@ function AuralApp() {
         {playlistId
           ? <button className="icon-button" onClick={() => store.removeFromPlaylist(playlistId, track.id)} aria-label={`Remove ${track.title}`}><Trash2 size={15} /></button>
           : <button className="icon-button" onClick={() => setAddTrackId(track.id)} aria-label={`Add ${track.title} to a playlist`}><Plus size={15} /></button>}
-        {store.downloadProgress[track.id] !== undefined
-          ? <button className="download-progress-control" onClick={() => store.cancelDownload(track.id)} aria-label={`Cancel download of ${track.title}`} title="Cancel download">
-            <span role={store.downloadProgress[track.id] < 0 ? "status" : "progressbar"} aria-valuemin={0} aria-valuemax={100} aria-valuenow={store.downloadProgress[track.id] >= 0 ? store.downloadProgress[track.id] : undefined}>
-              {store.downloadProgress[track.id] < 0 ? "…" : `${store.downloadProgress[track.id]}%`}
-            </span><X size={14} />
-          </button>
-          : downloadedIds.has(track.id)
-            ? <button className="icon-button active" onClick={() => { void store.removeDownload(track.id).catch(() => undefined); }} aria-label={`Remove ${track.title} download`} title="Available offline"><HardDrive size={15} /></button>
-            : track.downloadUrl
-              ? <button className="icon-button" onClick={() => {
-                void store.downloadTrack(track.id).then((completed) => {
-                  if (completed) {
-                    setImportMessage(`${track.title} is ready for offline listening.`);
-                    window.setTimeout(() => setImportMessage(""), 3500);
-                  }
-                }).catch(() => undefined);
-              }} aria-label={`Download ${track.title}`} title="Request provider-authorized download"><Download size={15} /></button>
-              : <span />}
+        <div className="track-row-end-actions">
+          {(track.imported || downloadedIds.has(track.id)) && (
+            <button
+              className={`icon-button ${isDisplayableImageUrl(track.artwork) ? "active" : ""}`}
+              onClick={() => setCoverEditTrackId(track.id)}
+              aria-label={isDisplayableImageUrl(track.artwork) ? `Change cover for ${track.title}` : `Add cover for ${track.title}`}
+              title={isDisplayableImageUrl(track.artwork) ? "Change cover picture" : "Add cover picture"}
+            >
+              <ImagePlus size={15} />
+            </button>
+          )}
+          {store.downloadProgress[track.id] !== undefined
+            ? <button className="download-progress-control" onClick={() => store.cancelDownload(track.id)} aria-label={`Cancel download of ${track.title}`} title="Cancel download">
+              <span role={store.downloadProgress[track.id] < 0 ? "status" : "progressbar"} aria-valuemin={0} aria-valuemax={100} aria-valuenow={store.downloadProgress[track.id] >= 0 ? store.downloadProgress[track.id] : undefined}>
+                {store.downloadProgress[track.id] < 0 ? "…" : `${store.downloadProgress[track.id]}%`}
+              </span><X size={14} />
+            </button>
+            : downloadedIds.has(track.id)
+              ? <button className="icon-button active" onClick={() => { void store.removeDownload(track.id).catch(() => undefined); }} aria-label={`Remove ${track.title} download`} title="Available offline"><HardDrive size={15} /></button>
+              : track.downloadUrl
+                ? <button className="icon-button" onClick={() => {
+                  void store.downloadTrack(track.id).then((completed) => {
+                    if (completed) {
+                      setImportMessage(`${track.title} is ready for offline listening.`);
+                      window.setTimeout(() => setImportMessage(""), 3500);
+                    }
+                  }).catch(() => undefined);
+                }} aria-label={`Download ${track.title}`} title="Request provider-authorized download"><Download size={15} /></button>
+                : null}
+        </div>
       </div>
     );
   };
@@ -859,6 +966,7 @@ function AuralApp() {
         onOpenNewPlaylist={() => setCreateOpen(true)}
         onImportFiles={handleDropImport}
         onTriggerImportPicker={triggerImportPicker}
+        onEditCover={(track) => setCoverEditTrackId(track.id)}
         onFolderExitToss={(label) => spawnPaperToss(label, "top", current.accent)}
       />
       <section className="content-section">
@@ -925,8 +1033,11 @@ function AuralApp() {
     <div className="page downloads-page page-enter" key="downloads">
       <div className="library-header">
         <div><p className="eyebrow">Available without internet</p><h1>Downloads</h1></div>
-        <div className={`connection-status ${online ? "online" : "offline"}`} role="status">
-          {online ? <Wifi size={16} /> : <WifiOff size={16} />}{online ? "Online" : "Offline"}
+        <div className="library-actions">
+          <button onClick={() => triggerImportPicker(null)}><Upload size={16} /> Import audio</button>
+          <div className={`connection-status ${online ? "online" : "offline"}`} role="status">
+            {online ? <Wifi size={16} /> : <WifiOff size={16} />}{online ? "Online" : "Offline"}
+          </div>
         </div>
       </div>
       <PWAInstallButton pwa={pwa} variant="card" />
@@ -1234,6 +1345,8 @@ function AuralApp() {
       <audio
         ref={audioRef}
         src={current.streamUrl}
+        preload="auto"
+        playsInline
         onPlay={() => { setIsPlaying(true); setPlaybackError(""); }}
         onPause={() => setIsPlaying(false)}
         onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
@@ -1255,7 +1368,7 @@ function AuralApp() {
           onKeyDown={(event) => { if (event.key === "Escape") closeExpandedPlayer(); }}
           onClick={(event) => { if (event.target === event.currentTarget) closeExpandedPlayer(); }}
         >
-          {current.artwork.startsWith("http") && (
+          {isDisplayableImageUrl(current.artwork) && (
             <img
               className="np-ambient-art"
               src={current.artwork}
@@ -1285,6 +1398,14 @@ function AuralApp() {
               aria-pressed={crtVisualizer}
               title="CRT visualizer"
             ><Radio size={19} /></button>
+            {(current.imported || downloadedIds.has(current.id)) && (
+              <button
+                className={`icon-button ${isDisplayableImageUrl(current.artwork) ? "active" : ""}`}
+                onClick={() => setCoverEditTrackId(current.id)}
+                aria-label={isDisplayableImageUrl(current.artwork) ? "Change cover picture" : "Add cover picture"}
+                title={isDisplayableImageUrl(current.artwork) ? "Change cover picture" : "Add cover picture"}
+              ><ImagePlus size={19} /></button>
+            )}
           </div>
           <button className="icon-button np-close" onClick={closeExpandedPlayer} aria-label="Close player" autoFocus><X size={20} /></button>
           <div className="now-playing-layout">
@@ -1377,6 +1498,18 @@ function AuralApp() {
             {!store.playlists.length && <p>No playlists yet. Create one from the library.</p>}
           </div>
         </div>
+      )}
+
+      {coverEditTrackId && (
+        <CoverArtModal
+          track={store.getTrack(coverEditTrackId) ?? null}
+          onClose={() => setCoverEditTrackId("")}
+          onSaveArtwork={async (trackId, dataUrl) => {
+            await store.updateTrackArtwork(trackId, dataUrl);
+            setImportMessage(dataUrl ? "Cover picture saved." : "Cover picture removed.");
+            window.setTimeout(() => setImportMessage(""), 3000);
+          }}
+        />
       )}
 
       {queueOpen && (
