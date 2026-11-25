@@ -582,7 +582,7 @@ export async function resolveTrackArtwork(
     const resolution = await lookupExternalArtwork(query, { forceRefresh, signal });
 
     if (resolution.status === "resolved") {
-      if (!track.artworkMeta || shouldUpgradeArtwork(track.artworkMeta, resolution.meta, !hasCurrentUrl)) {
+      if (forceRefresh || !track.artworkMeta || shouldUpgradeArtwork(track.artworkMeta, resolution.meta, !hasCurrentUrl)) {
         setTrackStatus(track.id, "resolved", resolution);
         return resolution;
       }

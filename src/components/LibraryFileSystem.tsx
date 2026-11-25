@@ -842,7 +842,7 @@ export default function LibraryFileSystem({
                           >
                             <Plus size={14} />
                           </button>
-                          {onEditCover && (track.imported || track.downloaded) && (
+                          {onEditCover && (
                             <button
                               type="button"
                               className="icon-button"

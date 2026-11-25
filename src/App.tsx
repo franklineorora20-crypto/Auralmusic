@@ -716,16 +716,14 @@ function AuralApp() {
           ? <button className="icon-button" onClick={() => store.removeFromPlaylist(playlistId, track.id)} aria-label={`Remove ${track.title}`}><Trash2 size={15} /></button>
           : <button className="icon-button" onClick={() => setAddTrackId(track.id)} aria-label={`Add ${track.title} to a playlist`}><Plus size={15} /></button>}
         <div className="track-row-end-actions">
-          {(track.imported || downloadedIds.has(track.id)) && (
-            <button
-              className={`icon-button ${isDisplayableImageUrl(track.artwork) ? "active" : ""}`}
-              onClick={() => setCoverEditTrackId(track.id)}
-              aria-label={isDisplayableImageUrl(track.artwork) ? `Change cover for ${track.title}` : `Add cover for ${track.title}`}
-              title={isDisplayableImageUrl(track.artwork) ? "Change cover picture" : "Add cover picture"}
-            >
-              <ImagePlus size={15} />
-            </button>
-          )}
+          <button
+            className={`icon-button ${isDisplayableImageUrl(track.artwork) ? "active" : ""}`}
+            onClick={() => setCoverEditTrackId(track.id)}
+            aria-label={isDisplayableImageUrl(track.artwork) ? `Change cover for ${track.title}` : `Add cover for ${track.title}`}
+            title={isDisplayableImageUrl(track.artwork) ? "Change cover picture" : "Add cover picture"}
+          >
+            <ImagePlus size={15} />
+          </button>
           {store.downloadProgress[track.id] !== undefined
             ? <button className="download-progress-control" onClick={() => store.cancelDownload(track.id)} aria-label={`Cancel download of ${track.title}`} title="Cancel download">
               <span role={store.downloadProgress[track.id] < 0 ? "status" : "progressbar"} aria-valuemin={0} aria-valuemax={100} aria-valuenow={store.downloadProgress[track.id] >= 0 ? store.downloadProgress[track.id] : undefined}>
@@ -892,13 +890,16 @@ function AuralApp() {
             ? store.playlists.filter((playlist) => playlist.name.toLowerCase().includes(query.toLowerCase())).map((playlist) => (
               <button className="search-playlist-result" key={playlist.id} onClick={() => navigate("playlist", playlist.id)}><ListMusic size={19} /><strong>{playlist.name}</strong><small>{playlist.trackIds.length} tracks · Your playlist</small></button>
             ))
-            : searchTracks.filter((track) => {
-              const term = query.trim().toLowerCase();
-              if (searchFilter === "Artists") return track.artist.toLowerCase().includes(term);
-              if (searchFilter === "Albums") return track.album.toLowerCase().includes(term);
-              if (searchFilter === "Genres") return track.genre.toLowerCase().includes(term);
-              return true;
-            }).map((track, index) => renderTrackRow({ track, index }))}
+            : searchTracks
+              .map((track) => store.getTrack(track.id) ?? track)
+              .filter((track) => {
+                const term = query.trim().toLowerCase();
+                if (searchFilter === "Artists") return track.artist.toLowerCase().includes(term);
+                if (searchFilter === "Albums") return track.album.toLowerCase().includes(term);
+                if (searchFilter === "Genres") return track.genre.toLowerCase().includes(term);
+                return true;
+              })
+              .map((track, index) => renderTrackRow({ track, index }))}
                     {!searchLoading && !searchError && !searchTracks.length && searchFilter !== "Playlists" && <p className="catalogue-status">No matches for this search.</p>}
 
           {searchHasMore && <button className="secondary-button load-more" onClick={loadMoreSearchResults} disabled={searchLoading}>Load more</button>}
@@ -1125,11 +1126,9 @@ function AuralApp() {
               <button className={`secondary-button ${store.savedAlbumIds.includes(album.album) ? "active" : ""}`} onClick={() => store.toggleSavedAlbum(album.album)}>
                 {store.savedAlbumIds.includes(album.album) ? "Saved album" : "Save album"}
               </button>
-              {(album.imported || downloadedIds.has(album.id) || !isDisplayableImageUrl(album.artwork)) && (
-                <button className="secondary-button" onClick={() => setCoverEditTrackId(album.id)}>
-                  <ImagePlus size={16} /> Cover art
-                </button>
-              )}
+              <button className="secondary-button" onClick={() => setCoverEditTrackId(album.id)}>
+                <ImagePlus size={16} /> Cover art
+              </button>
             </div>
           </div>
         </section>
@@ -1394,14 +1393,12 @@ function AuralApp() {
               aria-pressed={crtVisualizer}
               title="CRT visualizer"
             ><Radio size={19} /></button>
-            {(current.imported || downloadedIds.has(current.id)) && (
-              <button
-                className={`icon-button ${isDisplayableImageUrl(current.artwork) ? "active" : ""}`}
-                onClick={() => setCoverEditTrackId(current.id)}
-                aria-label={isDisplayableImageUrl(current.artwork) ? "Change cover picture" : "Add cover picture"}
-                title={isDisplayableImageUrl(current.artwork) ? "Change cover picture" : "Add cover picture"}
-              ><ImagePlus size={19} /></button>
-            )}
+            <button
+              className={`icon-button ${isDisplayableImageUrl(current.artwork) ? "active" : ""}`}
+              onClick={() => setCoverEditTrackId(current.id)}
+              aria-label={isDisplayableImageUrl(current.artwork) ? "Change cover picture" : "Add cover picture"}
+              title={isDisplayableImageUrl(current.artwork) ? "Change cover picture" : "Add cover picture"}
+            ><ImagePlus size={19} /></button>
           </div>
           <button className="icon-button np-close" onClick={closeExpandedPlayer} aria-label="Close player" autoFocus><X size={20} /></button>
           <div className="now-playing-layout">

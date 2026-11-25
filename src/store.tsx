@@ -57,7 +57,36 @@ const STORAGE_KEYS = {
   likedPlaylists: "aural-liked-playlists",
   savedAlbums: "aural-saved-albums",
   followedArtists: "aural-followed-artists",
+  customArtwork: "aural-custom-artwork",
 } as const;
+
+type ArtworkOverride = {
+  artwork: string;
+  artworkSmall: string;
+  artworkMeta: ArtworkMetadata;
+};
+
+function sanitizeOverrideForStorage(override: ArtworkOverride): ArtworkOverride {
+  const artwork = override.artwork.startsWith("blob:")
+    ? (override.artworkMeta.sourceUrl ?? "")
+    : override.artwork;
+  const artworkSmall = override.artworkSmall.startsWith("blob:")
+    ? (override.artworkMeta.sourceUrl ?? artwork)
+    : override.artworkSmall;
+  if (artwork === override.artwork && artworkSmall === override.artworkSmall) return override;
+  return { ...override, artwork, artworkSmall };
+}
+
+function applyArtworkOverride(track: Track, overrides: Record<string, ArtworkOverride>): Track {
+  const override = overrides[track.id];
+  if (!override) return track;
+  return {
+    ...track,
+    artwork: override.artwork,
+    artworkSmall: override.artworkSmall,
+    artworkMeta: override.artworkMeta,
+  };
+}
 
 /** How many catalogue tracks stay cached locally (metadata only). */
 const CATALOGUE_LIMIT = 600;
@@ -278,18 +307,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [likedPlaylistIds, setLikedPlaylistIds] = useState<string[]>(() => getSaved<string[]>(STORAGE_KEYS.likedPlaylists, []));
   const [savedAlbumIds, setSavedAlbumIds] = useState<string[]>(() => getSaved<string[]>(STORAGE_KEYS.savedAlbums, []));
   const [followedArtistIds, setFollowedArtistIds] = useState<string[]>(() => getSaved<string[]>(STORAGE_KEYS.followedArtists, []));
+  const [artworkOverrides, setArtworkOverrides] = useState<Record<string, ArtworkOverride>>(() =>
+    getSaved<Record<string, ArtworkOverride>>(STORAGE_KEYS.customArtwork, {}),
+  );
   const controllers = useRef(new Map<string, AbortController>());
   const offlineUrlsRef = useRef(new Map<string, string>());
 
+  const [downloads, setDownloads] = useState<Track[]>([]);
   const offlineById = useMemo(() => new Map(offlineTracks.map((track) => [track.id, track])), [offlineTracks]);
+
+  const effectiveCatalogueTracks = useMemo(
+    () => catalogueTracks.map((track) => applyArtworkOverride(track, artworkOverrides)),
+    [artworkOverrides, catalogueTracks],
+  );
+
+  const effectiveDownloads = useMemo(
+    () => downloads.map((track) => applyArtworkOverride(track, artworkOverrides)),
+    [artworkOverrides, downloads],
+  );
 
   const tracks = useMemo(() => {
     const merged = new Map<string, Track>();
-    sampleTracks.forEach((track) => merged.set(track.id, track));
-    catalogueTracks.forEach((track) => merged.set(track.id, offlineById.get(track.id) ?? track));
-    offlineTracks.forEach((track) => merged.set(track.id, track));
+    sampleTracks.forEach((track) => merged.set(track.id, applyArtworkOverride(track, artworkOverrides)));
+    catalogueTracks.forEach((track) => merged.set(track.id, applyArtworkOverride(offlineById.get(track.id) ?? track, artworkOverrides)));
+    offlineTracks.forEach((track) => merged.set(track.id, applyArtworkOverride(track, artworkOverrides)));
     return [...merged.values()];
-  }, [catalogueTracks, offlineById, offlineTracks]);
+  }, [artworkOverrides, catalogueTracks, offlineById, offlineTracks]);
 
   const trackIndex = useMemo(() => new Map(tracks.map((track) => [track.id, track])), [tracks]);
   const getTrack = useCallback((id: string) => trackIndex.get(id), [trackIndex]);
@@ -309,6 +352,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => save(STORAGE_KEYS.likedPlaylists, likedPlaylistIds), [likedPlaylistIds]);
   useEffect(() => save(STORAGE_KEYS.savedAlbums, savedAlbumIds), [savedAlbumIds]);
   useEffect(() => save(STORAGE_KEYS.followedArtists, followedArtistIds), [followedArtistIds]);
+  useEffect(() => {
+    const sanitized: Record<string, ArtworkOverride> = {};
+    for (const [id, entry] of Object.entries(artworkOverrides)) {
+      if (entry) sanitized[id] = sanitizeOverrideForStorage(entry);
+    }
+    save(STORAGE_KEYS.customArtwork, sanitized);
+  }, [artworkOverrides]);
 
   useEffect(() => {
     const activeControllers = controllers.current;
@@ -336,7 +386,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const setRepeat = useCallback((value: RepeatMode) => setRepeatState(value), []);
   const setQueue = useCallback((ids: string[]) => setQueueIds(Array.isArray(ids) ? ids : []), []);
 
-  const [downloads, setDownloads] = useState<Track[]>([]);
   const refreshDownloads = useCallback(async () => {
     try {
       const [rawTracks, usage, metadata] = await Promise.all([
@@ -605,10 +654,47 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         signal: controller.signal,
         onProgress: (percent) => setDownloadProgress((previous) => ({ ...previous, [id]: percent })),
       });
-      await saveOfflineTrack(track, blob);
+      let trackToSave = track;
+      try {
+        const headerBytes = new Uint8Array(await blob.slice(0, Math.min(blob.size, 6 * 1024 * 1024)).arrayBuffer());
+        const embedded = extractEmbeddedMediaFromAudioBytes(headerBytes);
+        if (embedded) {
+          const embeddedArtwork = !isDisplayableImageUrl(track.artwork) && embedded.artwork
+            ? imageBytesToDataUrl(embedded.artwork.data, embedded.artwork.mime)
+            : "";
+          const embeddedLyrics = !track.lyrics && (embedded.syncedLyrics || embedded.plainLyrics)
+            ? {
+                ...(embedded.syncedLyrics ? { syncedLyrics: embedded.syncedLyrics } : {}),
+                ...(embedded.plainLyrics ? { plainLyrics: embedded.plainLyrics } : {}),
+              }
+            : undefined;
+          if (embeddedArtwork || embeddedLyrics) {
+            trackToSave = {
+              ...track,
+              ...(embeddedArtwork
+                ? {
+                    artwork: embeddedArtwork,
+                    artworkSmall: embeddedArtwork,
+                    artworkMeta: {
+                      source: "embedded",
+                      attribution: "Embedded in audio file",
+                      confidence: 100,
+                      matchType: "embedded",
+                      verifiedAt: Date.now(),
+                    },
+                  }
+                : {}),
+              ...(embeddedLyrics ? { lyrics: embeddedLyrics } : {}),
+            };
+          }
+        }
+      } catch {
+        // Ignore embedded tag inspection errors on downloaded streams.
+      }
+      await saveOfflineTrack(trackToSave, blob);
       await refreshDownloads();
-      void ensureTrackArtworkOffline(track).then((withOfflineArt) => {
-        if (withOfflineArt.artwork !== track.artwork || withOfflineArt.artworkMeta) {
+      void ensureTrackArtworkOffline(trackToSave).then((withOfflineArt) => {
+        if (withOfflineArt.artwork !== trackToSave.artwork || withOfflineArt.artworkMeta) {
           const persistedArt = withOfflineArt.artworkMeta?.sourceUrl || withOfflineArt.artwork;
           void updateOfflineTrackArtwork(
             track.id,
@@ -742,7 +828,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return { imported, skipped };
   }, [refreshDownloads]);
 
-  const applyResolvedArtwork = useCallback((id: string, resolution: ArtworkResolution) => {
+  const applyResolvedArtwork = useCallback((id: string, resolution: ArtworkResolution, force = false) => {
     const applyToTrack = (track: Track): Track => {
       if (track.id !== id) return track;
       if (resolution.status !== "resolved" || !resolution.url) {
@@ -752,7 +838,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         return track;
       }
       const currentBroken = !isDisplayableImageUrl(track.artwork) || isBrokenArtworkUrl(track.artwork);
-      if (!shouldUpgradeArtwork(track.artworkMeta, resolution.meta, currentBroken)) {
+      if (!force && !shouldUpgradeArtwork(track.artworkMeta, resolution.meta, currentBroken)) {
         return track;
       }
       return {
@@ -763,6 +849,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       };
     };
 
+    if (force && resolution.status === "resolved" && resolution.url) {
+      setArtworkOverrides((previous) => ({
+        ...previous,
+        [id]: {
+          artwork: resolution.url,
+          artworkSmall: resolution.smallUrl || resolution.url,
+          artworkMeta: resolution.meta,
+        },
+      }));
+    }
+
     setOfflineTracks((previous) => previous.map(applyToTrack));
     setDownloads((previous) => previous.map(applyToTrack));
     setCatalogueTracks((previous) => previous.map(applyToTrack));
@@ -770,7 +867,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (resolution.status === "resolved" && resolution.url && (offlineById.has(id) || id.startsWith("local-"))) {
       const target = offlineById.get(id);
       const currentBroken = !target || !isDisplayableImageUrl(target.artwork) || isBrokenArtworkUrl(target.artwork);
-      if (!target || shouldUpgradeArtwork(target.artworkMeta, resolution.meta, currentBroken)) {
+      if (force || !target || shouldUpgradeArtwork(target.artworkMeta, resolution.meta, currentBroken)) {
         const persistedUrl = resolution.meta.sourceUrl || resolution.url;
         void updateOfflineTrackArtwork(id, persistedUrl, persistedUrl, resolution.meta).catch(() => undefined);
       }
@@ -788,7 +885,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
     const job = resolveTrackArtwork(track, { forceRefresh, skipSampleAuto: !forceRefresh })
       .then((resolution) => {
-        applyResolvedArtwork(id, resolution);
+        applyResolvedArtwork(id, resolution, forceRefresh);
       })
       .catch(() => undefined)
       .finally(() => {
@@ -816,6 +913,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ...(!stillHasImage && track.artworkMeta ? { artworkMeta: { ...track.artworkMeta, source: "none", confidence: 0 } } : {}),
       };
     };
+    setArtworkOverrides((previous) => {
+      const existing = previous[id];
+      if (!existing || (existing.artwork !== brokenUrl && existing.artworkSmall !== brokenUrl)) return previous;
+      const next = { ...previous };
+      delete next[id];
+      return next;
+    });
     setOfflineTracks((previous) => previous.map(stripBroken));
     setDownloads((previous) => previous.map(stripBroken));
     setCatalogueTracks((previous) => previous.map(stripBroken));
@@ -837,6 +941,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           confidence: 0,
           verifiedAt: Date.now(),
         };
+    setArtworkOverrides((previous) => ({
+      ...previous,
+      [id]: {
+        artwork,
+        artworkSmall: artwork,
+        artworkMeta: nextMeta,
+      },
+    }));
     setOfflineTracks((previous) =>
       previous.map((track) => (track.id === id ? { ...track, artwork, artworkSmall: artwork, artworkMeta: nextMeta } : track)),
     );
@@ -867,8 +979,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<Store>(() => ({
     tracks,
-    catalogueTracks,
-    downloads,
+    catalogueTracks: effectiveCatalogueTracks,
+    downloads: effectiveDownloads,
     downloadProgress,
     downloadingIds: [...controllers.current.keys()],
     storageUsage,
@@ -925,7 +1037,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setQueue,
     addCatalogueTracks,
   }), [
-    tracks, catalogueTracks, downloads, downloadProgress, storageUsage, storageError, offlineMeta,
+    tracks, effectiveCatalogueTracks, effectiveDownloads, downloadProgress, storageUsage, storageError, offlineMeta,
     playlists, folders, favouriteIds, recentIds, likedPlaylistIds, savedAlbumIds, followedArtistIds,
     getTrack, rememberTracks, isFavourite, toggleFavourite, createPlaylist, renamePlaylist,
     describePlaylist, deletePlaylist, createFolder, renameFolder, deleteFolder,
