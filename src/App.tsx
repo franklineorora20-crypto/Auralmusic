@@ -4,7 +4,7 @@ import Ferrofluid from "./components/Ferrofluid";
 import { getCrtPreset } from "./components/crtPresets";
 import {
   ArrowLeft, ArrowLeftRight, ArrowRight, ChevronDown, ChevronUp, Download, HardDrive,
-  Heart, Home, ImagePlus, Library, ListMusic, MicVocal, Pause, Play, Plus,
+  Heart, Home, ImagePlus, Infinity as InfinityIcon, Library, ListMusic, MicVocal, Pause, Play, Plus,
   Repeat1, Repeat2, Search, Shuffle, SkipBack, SkipForward, Trash2, Upload, Volume2,
   UserRound, VolumeX, Wifi, WifiOff, X, PanelLeftClose, PanelLeftOpen, ChevronsUp, Clock, Radio,
 } from "lucide-react";
@@ -21,7 +21,13 @@ import {
   syncMediaSessionPlaybackState,
   syncMediaSessionPosition,
 } from "./music/lib/mediaSession";
-import { computeNextTrackId, computePreviousTrackId } from "./music/lib/playbackQueue";
+import {
+  computeNextTrackId,
+  computePreviousTrackId,
+  createShuffledIds,
+  isTrackPlayable,
+  resolvePlayableQueue,
+} from "./music/lib/playbackQueue";
 import { useOnlineStatus, usePWAInstall } from "./pwa/usePWAInstall";
 import { StoreProvider, useStore } from "./store";
 import { demoTracks } from "./data";
@@ -92,6 +98,9 @@ function AuralApp() {
       if (paperTimerRef.current !== null) window.clearTimeout(paperTimerRef.current);
     };
   }, []);
+  const [autoplayEnabled, setAutoplayEnabled] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("aural-autoplay") ?? "true") as boolean; } catch { return true; }
+  });
   const [crossfadeEnabled, setCrossfadeEnabled] = useState(() => {
     try { return JSON.parse(localStorage.getItem("aural-crossfade") ?? "false") as boolean; } catch { return false; }
   });
@@ -99,14 +108,99 @@ function AuralApp() {
     try { return JSON.parse(localStorage.getItem("aural-crt") ?? "false") as boolean; } catch { return false; }
   });
   useEffect(() => {
+    try { localStorage.setItem("aural-autoplay", JSON.stringify(autoplayEnabled)); } catch { /* storage unavailable */ }
+  }, [autoplayEnabled]);
+  useEffect(() => {
     try { localStorage.setItem("aural-crossfade", JSON.stringify(crossfadeEnabled)); } catch { /* storage unavailable */ }
   }, [crossfadeEnabled]);
   useEffect(() => {
     try { localStorage.setItem("aural-crt", JSON.stringify(crtVisualizer)); } catch { /* storage unavailable */ }
   }, [crtVisualizer]);
+
+  const [shuffleOrder, setShuffleOrder] = useState<string[]>([]);
+  const playHistoryRef = useRef<string[]>([]);
   const crossfadeRef = useRef<HTMLAudioElement | null>(null);
   const fadingRef = useRef(false);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const importTargetFolderRef = useRef<string | null>(null);
+  const loadMoreController = useRef<AbortController | null>(null);
+  const loadedTrackIdRef = useRef(currentId);
+
+  const current = store.tracks.find((track) => track.id === currentId) ?? store.tracks[0];
+  const recentTracks = store.recentIds.map((id) => store.tracks.find((track) => track.id === id)).filter((track): track is Track => Boolean(track));
+  const queueTracks = store.queueIds.map((id) => store.tracks.find((track) => track.id === id)).filter((track): track is Track => Boolean(track));
+  const downloadedIds = useMemo(() => new Set(store.downloads.map((track) => track.id)), [store.downloads]);
+
+  useEffect(() => {
+    if (!store.shuffle) {
+      setShuffleOrder([]);
+      return;
+    }
+    const availability = { online, downloadedIds };
+    const activeIds = resolvePlayableQueue(store.queueIds, store.tracks, currentId, availability);
+    const availablePoolIds = store.tracks
+      .filter((track) => isTrackPlayable(track, availability))
+      .map((track) => track.id);
+    const activeSet = new Set(activeIds);
+    const extraIds = availablePoolIds.filter((id) => !activeSet.has(id));
+
+    setShuffleOrder((previous) => {
+      if (previous.length === 0) {
+        return [
+          ...createShuffledIds(activeIds, currentId),
+          ...createShuffledIds(extraIds),
+        ];
+      }
+      const prevActive = previous.filter((id) => activeSet.has(id));
+      const prevActiveSet = new Set(prevActive);
+      const missingActive = activeIds.filter((id) => !prevActiveSet.has(id));
+      const mergedActive = prevActive.length > 0
+        ? [...prevActive, ...createShuffledIds(missingActive)]
+        : createShuffledIds(activeIds, currentId);
+
+      const mergedActiveSet = new Set(mergedActive);
+      const extraSet = new Set(extraIds);
+      const prevExtra = previous.filter((id) => extraSet.has(id) && !mergedActiveSet.has(id));
+      const prevExtraSet = new Set(prevExtra);
+      const missingExtra = extraIds.filter((id) => !prevExtraSet.has(id));
+
+      return [...mergedActive, ...prevExtra, ...createShuffledIds(missingExtra)];
+    });
+  }, [store.shuffle, store.queueIds, store.tracks, online, downloadedIds, currentId]);
+
+  const nextTrackId = useMemo(
+    () =>
+      computeNextTrackId({
+        queueIds: store.queueIds,
+        tracks: store.tracks,
+        currentId,
+        shuffle: store.shuffle,
+        repeat: store.repeat,
+        autoplay: autoplayEnabled,
+        online,
+        downloadedIds,
+        shuffleOrder,
+        recentIds: store.recentIds,
+      }),
+    [
+      store.queueIds,
+      store.tracks,
+      currentId,
+      store.shuffle,
+      store.repeat,
+      autoplayEnabled,
+      online,
+      downloadedIds,
+      shuffleOrder,
+      store.recentIds,
+    ],
+  );
+
+  const nextQueueTrack = useMemo(
+    () => (nextTrackId && nextTrackId !== currentId ? store.tracks.find((t) => t.id === nextTrackId) : undefined),
+    [nextTrackId, currentId, store.tracks],
+  );
 
   /**
    * Crossfade: starts a second audio element ~6s before track end, ramps both
@@ -115,33 +209,32 @@ function AuralApp() {
    */
   useEffect(() => {
     const primary = audioRef.current;
-    if (!primary || !crossfadeEnabled || !isPlaying) return;
+    if (!primary || !crossfadeEnabled || !isPlaying || store.repeat === "one") return;
     const CROSSFADE_SECONDS = 6;
 
     const startFade = () => {
       if (fadingRef.current || !primary.duration || !Number.isFinite(primary.duration)) return;
+      if (primary.duration <= CROSSFADE_SECONDS * 1.5) return;
       const remaining = primary.duration - primary.currentTime;
       if (remaining > CROSSFADE_SECONDS || remaining <= 0.2) return;
+      if (!autoplayEnabled && store.repeat === "off") {
+        const currentInQueue = store.queueIds.indexOf(currentId);
+        const hasQueuedNext =
+          store.queueIds.length > 1 &&
+          (store.shuffle || (currentInQueue >= 0 && currentInQueue < store.queueIds.length - 1));
+        if (!hasQueuedNext) return;
+      }
+      if (!nextTrackId || nextTrackId === currentId) return;
+      const nextTrack = store.tracks.find((track) => track.id === nextTrackId);
+      if (!nextTrack) return;
+
       fadingRef.current = true;
-
-      const index = store.queueIds.indexOf(currentId);
-      let nextIndex = index + 1;
-      if (store.shuffle && store.queueIds.length > 1) {
-        do nextIndex = Math.floor(Math.random() * store.queueIds.length);
-        while (nextIndex === index);
-      }
-      if (nextIndex >= store.queueIds.length) {
-        if (store.repeat !== "all") { fadingRef.current = false; return; }
-        nextIndex = 0;
-      }
-      const nextTrack = store.tracks.find((track) => track.id === store.queueIds[nextIndex]);
-      if (!nextTrack) { fadingRef.current = false; return; }
-
       const ghost = new Audio(nextTrack.streamUrl);
       ghost.volume = 0;
       ghost.preload = "auto";
       crossfadeRef.current = ghost;
       const startVolume = store.volume;
+
       const fade = window.setInterval(() => {
         primary.volume = Math.max(0, primary.volume - 0.05);
         ghost.volume = Math.min(startVolume, ghost.volume + 0.05);
@@ -149,6 +242,13 @@ function AuralApp() {
           window.clearInterval(fade);
           fadingRef.current = false;
           crossfadeRef.current = null;
+          if (currentId && currentId !== nextTrack.id) {
+            playHistoryRef.current = [...playHistoryRef.current.slice(-49), currentId];
+          }
+          if (!store.queueIds.includes(nextTrack.id)) {
+            store.setQueue([...store.queueIds, nextTrack.id]);
+          }
+          loadedTrackIdRef.current = nextTrack.id;
           setCurrentId(nextTrack.id);
           store.addRecent(nextTrack.id);
           setCurrentTime(0);
@@ -163,6 +263,13 @@ function AuralApp() {
           ghost.src = "";
         }
       }, 250);
+
+      ghost.onerror = () => {
+        window.clearInterval(fade);
+        fadingRef.current = false;
+        crossfadeRef.current = null;
+        if (audioRef.current) audioRef.current.volume = startVolume;
+      };
     };
 
     primary.addEventListener("timeupdate", startFade);
@@ -173,23 +280,7 @@ function AuralApp() {
       fadingRef.current = false;
       if (audioRef.current) audioRef.current.volume = store.volume;
     };
-  }, [crossfadeEnabled, isPlaying, currentId, store.queueIds, store.shuffle, store.repeat, store.tracks, store.volume]);
-  const fileRef = useRef<HTMLInputElement>(null);
-  const importTargetFolderRef = useRef<string | null>(null);
-  const loadMoreController = useRef<AbortController | null>(null);
-
-  const current = store.tracks.find((track) => track.id === currentId) ?? store.tracks[0];
-  const recentTracks = store.recentIds.map((id) => store.tracks.find((track) => track.id === id)).filter((track): track is Track => Boolean(track));
-  const queueTracks = store.queueIds.map((id) => store.tracks.find((track) => track.id === id)).filter((track): track is Track => Boolean(track));
-  const downloadedIds = new Set(store.downloads.map((track) => track.id));
-  const nextQueueTrack = useMemo(() => {
-    const idx = store.queueIds.indexOf(currentId);
-    if (idx < 0 || !store.queueIds.length) return undefined;
-    const nextIdx = idx + 1 < store.queueIds.length ? idx + 1 : store.repeat === "all" ? 0 : -1;
-    if (nextIdx < 0) return undefined;
-    const nextId = store.queueIds[nextIdx];
-    return nextId && nextId !== currentId ? store.tracks.find((t) => t.id === nextId) : undefined;
-  }, [currentId, store.queueIds, store.repeat, store.tracks]);
+  }, [autoplayEnabled, crossfadeEnabled, isPlaying, currentId, nextTrackId, store.queueIds, store.repeat, store.shuffle, store.tracks, store.volume]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -282,8 +373,6 @@ function AuralApp() {
       });
   };
 
-  const loadedTrackIdRef = useRef(currentId);
-
   useEffect(() => {
     if (audioRef.current) audioRef.current.volume = store.volume;
   }, [store.volume]);
@@ -321,7 +410,18 @@ function AuralApp() {
 
   const playTrack = (track: Track, collection?: Track[]) => {
     if (collection?.length) {
-      store.setQueue(collection.map((item) => item.id));
+      const collectionIds = collection.map((item) => item.id);
+      store.setQueue(collectionIds);
+      if (store.shuffle) {
+        const activeSet = new Set(collectionIds);
+        const extraIds = store.tracks
+          .filter((item) => !activeSet.has(item.id) && isTrackPlayable(item, { online, downloadedIds }))
+          .map((item) => item.id);
+        setShuffleOrder([
+          ...createShuffledIds(collectionIds, track.id),
+          ...createShuffledIds(extraIds),
+        ]);
+      }
     } else if (!store.queueIds.includes(track.id)) {
       store.setQueue([...store.queueIds, track.id]);
     }
@@ -333,7 +433,45 @@ function AuralApp() {
       }
       setIsPlaying((playing) => !playing);
     } else {
+      if (currentId) {
+        playHistoryRef.current = [...playHistoryRef.current.slice(-49), currentId];
+      }
       switchToTrack(track.id, true);
+    }
+    setPlaybackError("");
+  };
+
+  const startShuffle = (collection: Track[]) => {
+    const availability = { online, downloadedIds };
+    const playable = collection.filter((track) => isTrackPlayable(track, availability));
+    const pool = playable.length ? playable : collection;
+    if (!pool.length) return;
+    const nonCurrentPool = pool.filter((item) => item.id !== currentId);
+    const pickPool = nonCurrentPool.length ? nonCurrentPool : pool;
+    const firstTrack = pickPool[Math.floor(Math.random() * pickPool.length)];
+    const activeIds = collection.map((item) => item.id);
+    const activeSet = new Set(activeIds);
+    const extraIds = store.tracks
+      .filter((item) => !activeSet.has(item.id) && isTrackPlayable(item, availability))
+      .map((item) => item.id);
+
+    store.setShuffle(true);
+    setShuffleOrder([
+      ...createShuffledIds(activeIds, firstTrack.id),
+      ...createShuffledIds(extraIds),
+    ]);
+    store.setQueue(activeIds);
+    store.addRecent(firstTrack.id);
+    if (firstTrack.id === currentId) {
+      seekToTime(0);
+      if (audioRef.current && !isPlaying) {
+        void audioRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+      }
+    } else {
+      if (currentId) {
+        playHistoryRef.current = [...playHistoryRef.current.slice(-49), currentId];
+      }
+      switchToTrack(firstTrack.id, true);
     }
     setPlaybackError("");
   };
@@ -363,11 +501,27 @@ function AuralApp() {
       currentId,
       shuffle: store.shuffle,
       repeat: store.repeat,
+      autoplay: autoplayEnabled,
+      online,
+      downloadedIds,
+      shuffleOrder,
+      recentIds: store.recentIds,
     });
     if (!nextId) {
       audioRef.current?.pause();
       setIsPlaying(false);
       return;
+    }
+    if (nextId === currentId && store.repeat === "all" && audioRef.current) {
+      audioRef.current.currentTime = 0;
+      void audioRef.current.play().catch(() => setIsPlaying(false));
+      return;
+    }
+    if (currentId && currentId !== nextId) {
+      playHistoryRef.current = [...playHistoryRef.current.slice(-49), currentId];
+    }
+    if (!store.queueIds.includes(nextId)) {
+      store.setQueue([...store.queueIds, nextId]);
     }
     switchToTrack(nextId, true);
   };
@@ -379,12 +533,22 @@ function AuralApp() {
       currentId,
       repeat: store.repeat,
       currentTime: audioRef.current?.currentTime ?? currentTime,
+      shuffle: store.shuffle,
+      historyIds: playHistoryRef.current,
+      online,
+      downloadedIds,
     });
     if (result.action === "restart") {
       seekToTime(0);
       return;
     }
     if (result.action === "switch" && result.trackId) {
+      if (store.shuffle && playHistoryRef.current.length > 0) {
+        const idx = playHistoryRef.current.lastIndexOf(result.trackId);
+        if (idx >= 0) {
+          playHistoryRef.current = playHistoryRef.current.slice(0, idx);
+        }
+      }
       switchToTrack(result.trackId, true);
     }
   };
@@ -393,9 +557,20 @@ function AuralApp() {
     if (store.repeat === "one" && audioRef.current) {
       audioRef.current.currentTime = 0;
       void audioRef.current.play();
-    } else {
-      playNext();
+      return;
     }
+    if (!autoplayEnabled && store.repeat === "off") {
+      const currentInQueue = store.queueIds.indexOf(currentId);
+      const hasQueuedNext =
+        store.queueIds.length > 1 &&
+        (store.shuffle || (currentInQueue >= 0 && currentInQueue < store.queueIds.length - 1));
+      if (!hasQueuedNext) {
+        audioRef.current?.pause();
+        setIsPlaying(false);
+        return;
+      }
+    }
+    playNext();
   };
 
   const mediaHandlersRef = useRef({
@@ -800,7 +975,7 @@ function AuralApp() {
       {recentTracks.length > 0 && <div className="section-heading recent-heading"><h2>Recently played</h2></div>}
       <section className="quick-grid">
         {recentTracks.slice(0, 6).map((track) => (
-          <button className="quick-card" key={track.id} onClick={() => playTrack(track)}>
+          <button className="quick-card" key={track.id} onClick={() => playTrack(track, recentTracks.slice(0, 6))}>
             <TrackArtwork track={track} size="small" />
             <strong>{track.album && track.album !== "Single" && track.album !== "Imported" ? track.album : track.title}{track.providerId === "sample" ? " · Sample" : ""}</strong>
             <span className="quick-play"><Play size={16} fill="currentColor" /></span>
@@ -890,25 +1065,30 @@ function AuralApp() {
             ? store.playlists.filter((playlist) => playlist.name.toLowerCase().includes(query.toLowerCase())).map((playlist) => (
               <button className="search-playlist-result" key={playlist.id} onClick={() => navigate("playlist", playlist.id)}><ListMusic size={19} /><strong>{playlist.name}</strong><small>{playlist.trackIds.length} tracks · Your playlist</small></button>
             ))
-            : searchTracks
-              .map((track) => store.getTrack(track.id) ?? track)
-              .filter((track) => {
-                const term = query.trim().toLowerCase();
-                if (searchFilter === "Artists") return track.artist.toLowerCase().includes(term);
-                if (searchFilter === "Albums") return track.album.toLowerCase().includes(term);
-                if (searchFilter === "Genres") return track.genre.toLowerCase().includes(term);
-                return true;
-              })
-              .map((track, index) => renderTrackRow({ track, index }))}
+            : (() => {
+              const displayedSearchTracks = searchTracks
+                .map((track) => store.getTrack(track.id) ?? track)
+                .filter((track) => {
+                  const term = query.trim().toLowerCase();
+                  if (searchFilter === "Artists") return track.artist.toLowerCase().includes(term);
+                  if (searchFilter === "Albums") return track.album.toLowerCase().includes(term);
+                  if (searchFilter === "Genres") return track.genre.toLowerCase().includes(term);
+                  return true;
+                });
+              return displayedSearchTracks.map((track, index) => renderTrackRow({ track, index, collection: displayedSearchTracks }));
+            })()}
                     {!searchLoading && !searchError && !searchTracks.length && searchFilter !== "Playlists" && <p className="catalogue-status">No matches for this search.</p>}
 
           {searchHasMore && <button className="secondary-button load-more" onClick={loadMoreSearchResults} disabled={searchLoading}>Load more</button>}
-          {searchFilter !== "Playlists" && filteredTracks.some((track) => track.providerId === "sample" || track.providerId === "local") && (
-            <section className="content-section">
-              <div className="section-heading"><h2>Your library &amp; sample previews</h2><small>Not Audius catalogue results</small></div>
-              {filteredTracks.filter((track) => track.providerId === "sample" || track.providerId === "local").map((track, index) => renderTrackRow({ track, index }))}
-            </section>
-          )}
+          {searchFilter !== "Playlists" && filteredTracks.some((track) => track.providerId === "sample" || track.providerId === "local") && (() => {
+            const localMatches = filteredTracks.filter((track) => track.providerId === "sample" || track.providerId === "local");
+            return (
+              <section className="content-section">
+                <div className="section-heading"><h2>Your library &amp; sample previews</h2><small>Not Audius catalogue results</small></div>
+                {localMatches.map((track, index) => renderTrackRow({ track, index, collection: localMatches }))}
+              </section>
+            );
+          })()}
         </section>
       ) : (
         <section className="content-section">
@@ -945,6 +1125,7 @@ function AuralApp() {
         currentId={currentId}
         isPlaying={isPlaying}
         onPlayTrack={playTrack}
+        onShuffleTracks={startShuffle}
         onNavigate={navigate}
         onAddTrackToPlaylist={(trackId) => setAddTrackId(trackId)}
         onOpenNewPlaylist={() => setCreateOpen(true)}
@@ -996,13 +1177,16 @@ function AuralApp() {
       )}
       <section className="content-section">
         <div className="section-heading"><h2>Saved tracks</h2></div>
-        {store.tracks.filter((track) => store.favouriteIds.includes(track.id)).map((track) => renderTrackRow({ track }))}
+        {(() => {
+          const saved = store.tracks.filter((track) => store.favouriteIds.includes(track.id));
+          return saved.map((track) => renderTrackRow({ track, collection: saved }));
+        })()}
         {!store.favouriteIds.length && <div className="empty-state"><Heart size={24} /><h3>No saved tracks yet</h3><p>Use the heart control beside a track to save it.</p></div>}
       </section>
       {recentTracks.length > 0 && (
         <section className="content-section">
           <div className="section-heading"><h2>Recently played</h2></div>
-          {recentTracks.map((track) => renderTrackRow({ track }))}
+          {recentTracks.map((track) => renderTrackRow({ track, collection: recentTracks }))}
         </section>
       )}
       {store.favouriteIds.length > 0 && (
@@ -1023,6 +1207,9 @@ function AuralApp() {
       <div className="library-header">
         <div><p className="eyebrow">Available without internet</p><h1>Downloads</h1></div>
         <div className="library-actions">
+          {store.downloads.length > 1 && (
+            <button onClick={() => startShuffle(store.downloads)}><Shuffle size={16} /> Shuffle</button>
+          )}
           <button onClick={() => triggerImportPicker(null)}><Upload size={16} /> Import audio</button>
           <div className={`connection-status ${online ? "online" : "offline"}`} role="status">
             {online ? <Wifi size={16} /> : <WifiOff size={16} />}{online ? "Online" : "Offline"}
@@ -1038,7 +1225,7 @@ function AuralApp() {
       <p className="offline-note">Only provider-approved downloads and audio you import are saved here. Stream links are never treated as download permission.</p>
       <section className="content-section">
         <div className="section-heading"><h2>Downloaded music</h2></div>
-        {store.downloads.map((track, index) => renderTrackRow({ track, index }))}
+        {store.downloads.map((track, index) => renderTrackRow({ track, index, collection: store.downloads }))}
         {!store.downloads.length && <div className="empty-state"><Download size={28} /><h3>No offline music yet</h3><p>Download a track when its provider explicitly permits it, or import your own audio.</p></div>}
       </section>
     </div>
@@ -1059,7 +1246,7 @@ function AuralApp() {
             <p>{artistTracks.length} track{artistTracks.length === 1 ? "" : "s"} · {albums.length} album{albums.length === 1 ? "" : "s"} · {formatTime(totalDuration)} total</p>
             <div className="detail-actions">
               <button className="primary-button" onClick={() => artistTracks[0] && playTrack(artistTracks[0], artistTracks)}><Play size={18} fill="currentColor" /> Play</button>
-              <button className="secondary-button" onClick={() => { store.setShuffle(true); artistTracks[0] && playTrack(artistTracks[Math.floor(Math.random() * artistTracks.length)], artistTracks); }}>
+              <button className="secondary-button" onClick={() => startShuffle(artistTracks)}>
                 <Shuffle size={16} /> Shuffle
               </button>
               <button className={`secondary-button ${store.followedArtistIds.includes(artist.artist) ? "active" : ""}`} onClick={() => store.toggleFollowedArtist(artist.artist)}>
@@ -1120,7 +1307,7 @@ function AuralApp() {
             )}
             <div className="detail-actions">
               <button className="primary-button" onClick={() => albumTracks[0] && playTrack(albumTracks[0], albumTracks)}><Play size={18} fill="currentColor" /> Play</button>
-              <button className="secondary-button" onClick={() => { store.setShuffle(true); albumTracks[0] && playTrack(albumTracks[Math.floor(Math.random() * albumTracks.length)], albumTracks); }}>
+              <button className="secondary-button" onClick={() => startShuffle(albumTracks)}>
                 <Shuffle size={16} /> Shuffle
               </button>
               <button className={`secondary-button ${store.savedAlbumIds.includes(album.album) ? "active" : ""}`} onClick={() => store.toggleSavedAlbum(album.album)}>
@@ -1152,6 +1339,7 @@ function AuralApp() {
             <p>{playlist.description}</p>
             <div className="detail-actions">
               {tracks[0] && <button className="primary-button" onClick={() => playTrack(tracks[0], tracks)}><Play size={18} fill="currentColor" /> Play</button>}
+              {tracks.length > 1 && <button className="secondary-button" onClick={() => startShuffle(tracks)}><Shuffle size={16} /> Shuffle</button>}
               <button className="secondary-button" onClick={() => store.deletePlaylist(playlist.id)}><Trash2 size={16} /> Delete</button>
             </div>
           </div>
@@ -1307,6 +1495,13 @@ function AuralApp() {
           {playbackError && <p className="playback-error" role="alert">{playbackError}</p>}
         </div>
         <div className="player-tools">
+          <button
+            className={autoplayEnabled ? "active" : ""}
+            onClick={() => setAutoplayEnabled(!autoplayEnabled)}
+            aria-label="Autoplay"
+            aria-pressed={autoplayEnabled}
+            title={autoplayEnabled ? "Autoplay next available song: on" : "Autoplay next available song: off"}
+          ><InfinityIcon size={17} /></button>
           <button className={crossfadeEnabled ? "active" : ""} onClick={() => setCrossfadeEnabled(!crossfadeEnabled)} aria-label="Crossfade" aria-pressed={crossfadeEnabled} title="Crossfade between tracks"><ArrowLeftRight size={17} /></button>
           <button
             className={lyricsOpen ? "active" : ""}
@@ -1439,6 +1634,9 @@ function AuralApp() {
                 </button>
               </div>
               <div className="np-bottom-actions">
+                <button className={`secondary-button ${autoplayEnabled ? "active" : ""}`} onClick={() => setAutoplayEnabled(!autoplayEnabled)} aria-pressed={autoplayEnabled}>
+                  <InfinityIcon size={16} /> Autoplay
+                </button>
                 <button className={`secondary-button ${npLyricsOpen ? "active" : ""}`} onClick={() => setNpLyricsOpen(!npLyricsOpen)}>
                   <MicVocal size={16} /> {npLyricsOpen ? "Hide lyrics" : "Lyrics"}
                 </button>
@@ -1513,7 +1711,19 @@ function AuralApp() {
 
       {queueOpen && (
         <aside className="queue-panel paper-unfold" aria-label="Queue">
-          <header><div><p className="eyebrow">Now next</p><h2>Queue</h2></div><button className="icon-button" onClick={closeQueuePanel} aria-label="Close queue"><X size={18} /></button></header>
+          <header>
+            <div><p className="eyebrow">Now next</p><h2>Queue</h2></div>
+            <div className="queue-header-actions">
+              <button
+                className={`icon-button ${autoplayEnabled ? "active" : ""}`}
+                onClick={() => setAutoplayEnabled(!autoplayEnabled)}
+                aria-label="Autoplay"
+                aria-pressed={autoplayEnabled}
+                title={autoplayEnabled ? "Autoplay next available song: on" : "Autoplay next available song: off"}
+              ><InfinityIcon size={16} /></button>
+              <button className="icon-button" onClick={closeQueuePanel} aria-label="Close queue"><X size={18} /></button>
+            </div>
+          </header>
           <div className="queue-list">
             {current && (
               <div className="queue-item now-playing-item" aria-current="true">
@@ -1535,7 +1745,20 @@ function AuralApp() {
                 <button className="icon-button" onClick={() => store.setQueue(store.queueIds.filter((id) => id !== track.id))} aria-label={`Remove ${track.title} from queue`}><Trash2 size={15} /></button>
               </div>
             ))}
-            {!queueTracks.length && <div className="empty-state"><ListMusic size={24} /><h3>Queue is empty</h3><p>Play something, or add tracks from search to build a listening line-up.</p></div>}
+            {autoplayEnabled && nextQueueTrack && !store.queueIds.slice(Math.max(0, store.queueIds.indexOf(currentId) + 1)).includes(nextQueueTrack.id) && (
+              <div className="queue-autoplay-section">
+                <p className="queue-section-label">{store.shuffle ? "Autoplay · Shuffled next" : "Autoplay · Next available"}</p>
+                <button className="queue-autoplay-preview" onClick={playNext}>
+                  <TrackArtwork track={nextQueueTrack} size="small" />
+                  <span className="queue-item-copy">
+                    <strong>{nextQueueTrack.title}</strong>
+                    <small>{nextQueueTrack.artist}</small>
+                  </span>
+                  <SkipForward size={15} />
+                </button>
+              </div>
+            )}
+            {!queueTracks.length && (!autoplayEnabled || !nextQueueTrack) && <div className="empty-state"><ListMusic size={24} /><h3>Queue is empty</h3><p>Play something, or add tracks from search to build a listening line-up.</p></div>}
           </div>
           {queueTracks.length > 0 && <button className="secondary-button" onClick={() => store.setQueue([])}>Clear queue</button>}
         </aside>

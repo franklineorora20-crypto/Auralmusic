@@ -19,6 +19,7 @@ import {
   Play,
   Plus,
   Search,
+  Shuffle,
   Trash2,
   Upload,
   X,
@@ -65,6 +66,7 @@ interface LibraryFileSystemProps {
   currentId: string;
   isPlaying: boolean;
   onPlayTrack: (track: Track, collection?: Track[]) => void;
+  onShuffleTracks?: (tracks: Track[]) => void;
   onNavigate: (view: View, id?: string) => void;
   onAddTrackToPlaylist: (trackId: string) => void;
   onOpenNewPlaylist: () => void;
@@ -118,6 +120,7 @@ export default function LibraryFileSystem({
   currentId,
   isPlaying,
   onPlayTrack,
+  onShuffleTracks,
   onNavigate,
   onAddTrackToPlaylist,
   onOpenNewPlaylist,
@@ -688,6 +691,15 @@ export default function LibraryFileSystem({
                     <Play size={15} fill="currentColor" /> Play folder
                   </button>
                 )}
+                {directoryTracks.length > 1 && onShuffleTracks && (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => onShuffleTracks(directoryTracks)}
+                  >
+                    <Shuffle size={15} /> Shuffle
+                  </button>
+                )}
               </div>
             )}
 
@@ -707,6 +719,15 @@ export default function LibraryFileSystem({
                     onClick={() => onPlayTrack(directoryTracks[0], directoryTracks)}
                   >
                     <Play size={15} fill="currentColor" /> Play album
+                  </button>
+                )}
+                {directoryTracks.length > 1 && onShuffleTracks && (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => onShuffleTracks(directoryTracks)}
+                  >
+                    <Shuffle size={15} /> Shuffle
                   </button>
                 )}
               </div>
@@ -730,6 +751,15 @@ export default function LibraryFileSystem({
                     <Play size={15} fill="currentColor" /> Play artist
                   </button>
                 )}
+                {directoryTracks.length > 1 && onShuffleTracks && (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => onShuffleTracks(directoryTracks)}
+                  >
+                    <Shuffle size={15} /> Shuffle
+                  </button>
+                )}
               </div>
             )}
 
@@ -749,6 +779,15 @@ export default function LibraryFileSystem({
                     onClick={() => onPlayTrack(directoryTracks[0], directoryTracks)}
                   >
                     <Play size={15} fill="currentColor" /> Play playlist
+                  </button>
+                )}
+                {directoryTracks.length > 1 && onShuffleTracks && (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => onShuffleTracks(directoryTracks)}
+                  >
+                    <Shuffle size={15} /> Shuffle
                   </button>
                 )}
               </div>
