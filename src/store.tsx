@@ -20,10 +20,19 @@ import {
 import { fetchTrackAudio } from "./music/services/downloadService";
 import { sampleTracks } from "./music/providers/sample";
 import { setLocalTracks } from "./music/providers";
-import { extractEmbeddedMediaFromAudioBytes, imageBytesToDataUrl } from "./music/lib/mediaMetadata";
+import { extractEmbeddedMediaFromAudioBytes, imageBytesToDataUrl, isDisplayableImageUrl } from "./music/lib/mediaMetadata";
 import { GENRE_CATEGORIES } from "./music/types/music";
-import type { Playlist, ProviderId, RepeatMode, Track } from "./types";
+import type { ArtworkMetadata, Playlist, ProviderId, RepeatMode, Track } from "./types";
 import { PROVIDER_ACCENTS, PROVIDER_NAMES } from "./music/types/music";
+import {
+  ensureTrackArtworkOffline,
+  hydrateCachedArtworkForTrack,
+  isBrokenArtworkUrl,
+  markArtworkUrlBroken,
+  resolveTrackArtwork,
+} from "./music/services/artwork/artworkService";
+import { shouldUpgradeArtwork } from "./music/services/artwork/matching";
+import type { ArtworkResolution } from "./music/services/artwork/types";
 
 export type LibraryFolder = {
   id: string;
@@ -85,6 +94,14 @@ function migrateTrack(stored: StoredTrack): Track | null {
   const providerTrackId = stored.providerTrackId ?? stored.id.replace(/^(audius|jamendo|sample|local)-/, "");
   const streamUrl = stored.streamUrl ?? stored.src ?? "";
   const id = stored.id.startsWith(`${providerId}-`) || providerId === "local" ? stored.id : `${providerId}-${stored.id}`;
+  const rawArtwork = stored.artwork ?? "";
+  const persistedArtwork = rawArtwork.startsWith("blob:")
+    ? (stored.artworkMeta?.sourceUrl ?? "")
+    : rawArtwork;
+  const rawArtworkSmall = stored.artworkSmall ?? persistedArtwork;
+  const persistedArtworkSmall = rawArtworkSmall.startsWith("blob:")
+    ? (stored.artworkMeta?.sourceUrl ?? persistedArtwork)
+    : rawArtworkSmall;
   return {
     id,
     providerId,
@@ -95,8 +112,9 @@ function migrateTrack(stored: StoredTrack): Track | null {
     ...(stored.artistId ? { artistId: stored.artistId } : {}),
     album: stored.album ?? "Single",
     ...(stored.albumId ? { albumId: stored.albumId } : {}),
-    artwork: stored.artwork ?? "",
-    artworkSmall: stored.artworkSmall ?? stored.artwork ?? "",
+    artwork: persistedArtwork,
+    artworkSmall: persistedArtworkSmall,
+    ...(stored.artworkMeta ? { artworkMeta: stored.artworkMeta } : {}),
     duration: typeof stored.duration === "number" ? stored.duration : 0,
     streamUrl,
     ...(stored.downloadUrl ? { downloadUrl: stored.downloadUrl } : {}),
@@ -112,6 +130,21 @@ function migrateTrack(stored: StoredTrack): Track | null {
     accent: stored.accent ?? PROVIDER_ACCENTS[providerId],
     ...(stored.imported ? { imported: true } : {}),
     ...(stored.lyrics ? { lyrics: stored.lyrics } : {}),
+  };
+}
+
+function sanitizeTrackForLocalStorage(track: Track): Track {
+  const safeArt = track.artwork.startsWith("blob:")
+    ? (track.artworkMeta?.sourceUrl ?? "")
+    : track.artwork;
+  const safeSmall = (track.artworkSmall || "").startsWith("blob:")
+    ? (track.artworkMeta?.sourceUrl ?? safeArt)
+    : track.artworkSmall;
+  if (safeArt === track.artwork && safeSmall === track.artworkSmall) return track;
+  return {
+    ...track,
+    artwork: safeArt,
+    artworkSmall: safeSmall,
   };
 }
 
@@ -163,6 +196,8 @@ type Store = {
   removeDownload: (id: string) => Promise<void>;
   importAudio: (files: File[], targetFolderId?: string | null) => Promise<{ imported: number; skipped: number }>;
   updateTrackArtwork: (id: string, artwork: string) => Promise<void>;
+  requestTrackArtwork: (id: string, options?: { forceRefresh?: boolean }) => Promise<void>;
+  reportBrokenArtwork: (id: string, brokenUrl: string) => void;
   removeLocalTrack: (id: string) => Promise<void>;
   volume: number;
   shuffle: boolean;
@@ -264,7 +299,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setLocalTracks(offlineTracks.filter((track) => track.imported));
   }, [offlineTracks]);
 
-  useEffect(() => save(STORAGE_KEYS.catalogue, catalogueTracks.slice(-CATALOGUE_LIMIT)), [catalogueTracks]);
+  useEffect(() => {
+    save(STORAGE_KEYS.catalogue, catalogueTracks.slice(-CATALOGUE_LIMIT).map(sanitizeTrackForLocalStorage));
+  }, [catalogueTracks]);
   useEffect(() => save(STORAGE_KEYS.playlists, playlists), [playlists]);
   useEffect(() => save(STORAGE_KEYS.folders, folders), [folders]);
   useEffect(() => save(STORAGE_KEYS.favourites, favouriteIds), [favouriteIds]);
@@ -325,13 +362,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
         return track;
       });
+      const hydrated = await Promise.all(resolved.map((track) => hydrateCachedArtworkForTrack(track)));
       const metaMap: Record<string, OfflineFileMeta> = {};
       for (const entry of metadata) {
         metaMap[entry.id] = { bytes: entry.bytes, savedAt: entry.savedAt };
       }
       setOfflineMeta(metaMap);
-      setOfflineTracks(resolved);
-      setDownloads(resolved);
+      setOfflineTracks(hydrated);
+      setDownloads(hydrated);
       setStorageUsage(usage);
     } catch (error: unknown) {
       setStorageError(messageFrom(error, "Offline storage is unavailable."));
@@ -340,6 +378,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refreshDownloads();
   }, [refreshDownloads]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all(catalogueTracks.map((track) => hydrateCachedArtworkForTrack(track))).then((hydrated) => {
+      if (cancelled) return;
+      const changed = hydrated.some(
+        (item, idx) =>
+          item.artwork !== catalogueTracks[idx]?.artwork ||
+          item.artworkMeta?.sourceUrl !== catalogueTracks[idx]?.artworkMeta?.sourceUrl,
+      );
+      if (changed) {
+        setCatalogueTracks(hydrated);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const downloadsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -550,6 +607,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       });
       await saveOfflineTrack(track, blob);
       await refreshDownloads();
+      void ensureTrackArtworkOffline(track).then((withOfflineArt) => {
+        if (withOfflineArt.artwork !== track.artwork || withOfflineArt.artworkMeta) {
+          const persistedArt = withOfflineArt.artworkMeta?.sourceUrl || withOfflineArt.artwork;
+          void updateOfflineTrackArtwork(
+            track.id,
+            persistedArt,
+            persistedArt,
+            withOfflineArt.artworkMeta,
+          ).catch(() => undefined);
+          setOfflineTracks((prev) =>
+            prev.map((t) => (t.id === track.id ? { ...t, artwork: withOfflineArt.artwork, artworkSmall: withOfflineArt.artworkSmall, artworkMeta: withOfflineArt.artworkMeta } : t)),
+          );
+          setDownloads((prev) =>
+            prev.map((t) => (t.id === track.id ? { ...t, artwork: withOfflineArt.artwork, artworkSmall: withOfflineArt.artworkSmall, artworkMeta: withOfflineArt.artworkMeta } : t)),
+          );
+        }
+      }).catch(() => undefined);
       return true;
     } catch (error: unknown) {
       if (error instanceof DOMException && error.name === "AbortError") {
@@ -595,13 +669,26 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       try {
         const parsedName = parseFileName(file.name);
         const headerBytes = new Uint8Array(await file.slice(0, Math.min(file.size, 6 * 1024 * 1024)).arrayBuffer());
-        const embedded = extractEmbeddedMediaFromAudioBytes(headerBytes);
+        let embedded = extractEmbeddedMediaFromAudioBytes(headerBytes);
+        if (!embedded && /\.(m4a|mp4|aac)$/i.test(file.name) && file.size > headerBytes.length && file.size <= 32 * 1024 * 1024) {
+          const fullBytes = new Uint8Array(await file.arrayBuffer());
+          embedded = extractEmbeddedMediaFromAudioBytes(fullBytes);
+        }
         const title = embedded?.title || parsedName.title;
         const artist = embedded?.artist || parsedName.artist;
         const album = embedded?.album || "Imported";
         const embeddedArtwork = embedded?.artwork
           ? imageBytesToDataUrl(embedded.artwork.data, embedded.artwork.mime)
           : "";
+        const embeddedArtworkMeta: ArtworkMetadata | undefined = embeddedArtwork
+          ? {
+              source: "embedded",
+              attribution: "Embedded in audio file",
+              confidence: 100,
+              matchType: "embedded",
+              verifiedAt: Date.now(),
+            }
+          : undefined;
         const lyrics = embedded?.syncedLyrics || embedded?.plainLyrics
           ? {
               ...(embedded.syncedLyrics ? { syncedLyrics: embedded.syncedLyrics } : {}),
@@ -619,6 +706,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           album,
           artwork: embeddedArtwork,
           artworkSmall: embeddedArtwork,
+          ...(embeddedArtworkMeta ? { artworkMeta: embeddedArtworkMeta } : {}),
           duration: 0,
           streamUrl: URL.createObjectURL(file),
           genre: "Imported",
@@ -654,18 +742,112 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return { imported, skipped };
   }, [refreshDownloads]);
 
+  const applyResolvedArtwork = useCallback((id: string, resolution: ArtworkResolution) => {
+    const applyToTrack = (track: Track): Track => {
+      if (track.id !== id) return track;
+      if (resolution.status !== "resolved" || !resolution.url) {
+        if (!track.artworkMeta || track.artworkMeta.source === "none") {
+          return { ...track, artworkMeta: resolution.meta };
+        }
+        return track;
+      }
+      const currentBroken = !isDisplayableImageUrl(track.artwork) || isBrokenArtworkUrl(track.artwork);
+      if (!shouldUpgradeArtwork(track.artworkMeta, resolution.meta, currentBroken)) {
+        return track;
+      }
+      return {
+        ...track,
+        artwork: resolution.url,
+        artworkSmall: resolution.smallUrl || resolution.url,
+        artworkMeta: resolution.meta,
+      };
+    };
+
+    setOfflineTracks((previous) => previous.map(applyToTrack));
+    setDownloads((previous) => previous.map(applyToTrack));
+    setCatalogueTracks((previous) => previous.map(applyToTrack));
+
+    if (resolution.status === "resolved" && resolution.url && (offlineById.has(id) || id.startsWith("local-"))) {
+      const target = offlineById.get(id);
+      const currentBroken = !target || !isDisplayableImageUrl(target.artwork) || isBrokenArtworkUrl(target.artwork);
+      if (!target || shouldUpgradeArtwork(target.artworkMeta, resolution.meta, currentBroken)) {
+        const persistedUrl = resolution.meta.sourceUrl || resolution.url;
+        void updateOfflineTrackArtwork(id, persistedUrl, persistedUrl, resolution.meta).catch(() => undefined);
+      }
+    }
+  }, [offlineById]);
+
+  const artworkRequestsRef = useRef(new Map<string, Promise<void>>());
+
+  const requestTrackArtwork = useCallback(async (id: string, options?: { forceRefresh?: boolean }) => {
+    const forceRefresh = Boolean(options?.forceRefresh);
+    const track = trackIndex.get(id);
+    if (!track) return;
+    if (!forceRefresh && artworkRequestsRef.current.has(id)) {
+      return artworkRequestsRef.current.get(id);
+    }
+    const job = resolveTrackArtwork(track, { forceRefresh, skipSampleAuto: !forceRefresh })
+      .then((resolution) => {
+        applyResolvedArtwork(id, resolution);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        artworkRequestsRef.current.delete(id);
+      });
+    artworkRequestsRef.current.set(id, job);
+    return job;
+  }, [applyResolvedArtwork, trackIndex]);
+
+  const reportBrokenArtwork = useCallback((id: string, brokenUrl: string) => {
+    if (!brokenUrl) return;
+    markArtworkUrlBroken(brokenUrl);
+    const stripBroken = (track: Track): Track => {
+      if (track.id !== id) return track;
+      const mainBroken = track.artwork === brokenUrl;
+      const smallBroken = track.artworkSmall === brokenUrl;
+      if (!mainBroken && !smallBroken) return track;
+      const nextMain = mainBroken ? "" : track.artwork;
+      const nextSmall = smallBroken ? "" : track.artworkSmall;
+      const stillHasImage = Boolean(nextMain || nextSmall);
+      return {
+        ...track,
+        artwork: nextMain,
+        artworkSmall: nextSmall,
+        ...(!stillHasImage && track.artworkMeta ? { artworkMeta: { ...track.artworkMeta, source: "none", confidence: 0 } } : {}),
+      };
+    };
+    setOfflineTracks((previous) => previous.map(stripBroken));
+    setDownloads((previous) => previous.map(stripBroken));
+    setCatalogueTracks((previous) => previous.map(stripBroken));
+    void requestTrackArtwork(id);
+  }, [requestTrackArtwork]);
+
   const updateTrackArtwork = useCallback(async (id: string, artwork: string) => {
+    const nextMeta: ArtworkMetadata = artwork
+      ? {
+          source: "user",
+          attribution: "Custom cover",
+          confidence: 100,
+          matchType: "user",
+          verifiedAt: Date.now(),
+        }
+      : {
+          source: "none",
+          attribution: "Custom cover removed",
+          confidence: 0,
+          verifiedAt: Date.now(),
+        };
     setOfflineTracks((previous) =>
-      previous.map((track) => (track.id === id ? { ...track, artwork, artworkSmall: artwork } : track)),
+      previous.map((track) => (track.id === id ? { ...track, artwork, artworkSmall: artwork, artworkMeta: nextMeta } : track)),
     );
     setDownloads((previous) =>
-      previous.map((track) => (track.id === id ? { ...track, artwork, artworkSmall: artwork } : track)),
+      previous.map((track) => (track.id === id ? { ...track, artwork, artworkSmall: artwork, artworkMeta: nextMeta } : track)),
     );
     setCatalogueTracks((previous) =>
-      previous.map((track) => (track.id === id ? { ...track, artwork, artworkSmall: artwork } : track)),
+      previous.map((track) => (track.id === id ? { ...track, artwork, artworkSmall: artwork, artworkMeta: nextMeta } : track)),
     );
     try {
-      await updateOfflineTrackArtwork(id, artwork);
+      await updateOfflineTrackArtwork(id, artwork, artwork, nextMeta);
     } catch (error: unknown) {
       setStorageError(messageFrom(error, "Could not save cover picture."));
     }
@@ -730,6 +912,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     removeDownload,
     importAudio,
     updateTrackArtwork,
+    requestTrackArtwork,
+    reportBrokenArtwork,
     removeLocalTrack,
     volume,
     shuffle,
@@ -748,7 +932,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     addTrackToFolder, removeTrackFromFolder, moveTrackToFolder,
     togglePlaylistLike, toggleSavedAlbum, toggleFollowedArtist,
     addToPlaylist, addTracksToPlaylist, removeFromPlaylist, reorderPlaylistTrack, movePlaylistTrack,
-    addRecent, downloadTrack, cancelDownload, removeDownload, importAudio, updateTrackArtwork, removeLocalTrack,
+    addRecent, downloadTrack, cancelDownload, removeDownload, importAudio, updateTrackArtwork,
+    requestTrackArtwork, reportBrokenArtwork, removeLocalTrack,
     volume, shuffle, repeat, queueIds, setVolume, setShuffle, setRepeat, setQueue, addCatalogueTracks,
   ]);
 

@@ -1,11 +1,11 @@
-import type { Track } from "./types";
+import type { ArtworkMatchType, ArtworkMetadata, ArtworkSource, Track } from "./types";
 
 /**
- * Offline audio storage.
+ * Offline audio and artwork storage.
  *
- * Audio blobs live in IndexedDB (browser storage quota applies) while the track
- * metadata that describes them is kept alongside the blob, so the offline
- * library can be rebuilt without any network access.
+ * Audio blobs, deduplicated cover art blobs, and artwork lookup records live
+ * in IndexedDB (browser storage quota applies), so the offline library and
+ * authentic album covers remain available without network access.
  */
 
 export type OfflineRecord = {
@@ -16,14 +16,51 @@ export type OfflineRecord = {
   savedAt: number;
 };
 
+export type OfflineArtworkBlobRecord = {
+  /** Canonical remote URL or content hash key so identical images are stored once. */
+  key: string;
+  blob: Blob;
+  mime: string;
+  bytes: number;
+  width?: number;
+  height?: number;
+  savedAt: number;
+  lastAccessedAt: number;
+};
+
+export type OfflineArtworkLookupRecord = {
+  lookupKey: string;
+  status: "resolved" | "missing" | "error";
+  source: ArtworkSource;
+  attribution: string;
+  confidence: number;
+  matchType?: ArtworkMatchType;
+  releaseTitle?: string;
+  releaseArtist?: string;
+  mbid?: string;
+  remoteUrl?: string;
+  remoteSmallUrl?: string;
+  blobKey?: string;
+  smallBlobKey?: string;
+  width?: number;
+  height?: number;
+  checkedAt: number;
+  expiresAt: number;
+};
+
 const DB_NAME = "aural-offline";
 const STORE_NAME = "audio";
-const DB_VERSION = 1;
+const ARTWORK_BLOB_STORE = "artwork_blobs";
+const ARTWORK_LOOKUP_STORE = "artwork_lookup";
+const DB_VERSION = 2;
+
+const MAX_ARTWORK_BLOBS = 200;
+const MAX_ARTWORK_BYTES = 64 * 1024 * 1024;
 
 let database: Promise<IDBDatabase> | undefined;
 
 function openDatabase(): Promise<IDBDatabase> {
-  if (!("indexedDB" in window)) {
+  if (typeof window === "undefined" || !("indexedDB" in window)) {
     return Promise.reject(new Error("Persistent offline storage is unavailable in this browser."));
   }
   if (!database) {
@@ -34,6 +71,12 @@ function openDatabase(): Promise<IDBDatabase> {
         if (!db.objectStoreNames.contains(STORE_NAME)) {
           db.createObjectStore(STORE_NAME, { keyPath: "id" });
         }
+        if (!db.objectStoreNames.contains(ARTWORK_BLOB_STORE)) {
+          db.createObjectStore(ARTWORK_BLOB_STORE, { keyPath: "key" });
+        }
+        if (!db.objectStoreNames.contains(ARTWORK_LOOKUP_STORE)) {
+          db.createObjectStore(ARTWORK_LOOKUP_STORE, { keyPath: "lookupKey" });
+        }
       };
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error ?? new Error("Could not open offline storage."));
@@ -42,15 +85,16 @@ function openDatabase(): Promise<IDBDatabase> {
   return database;
 }
 
-function runTransaction<T>(
+function runStoreTransaction<T>(
+  storeName: string,
   mode: IDBTransactionMode,
   operation: (store: IDBObjectStore) => IDBRequest<T>,
 ): Promise<T> {
   return openDatabase().then(
     (db) =>
       new Promise<T>((resolve, reject) => {
-        const transaction = db.transaction(STORE_NAME, mode);
-        const request = operation(transaction.objectStore(STORE_NAME));
+        const transaction = db.transaction(storeName, mode);
+        const request = operation(transaction.objectStore(storeName));
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error ?? new Error("Offline storage could not be read."));
         transaction.onabort = () => reject(transaction.error ?? new Error("Offline storage was interrupted."));
@@ -60,7 +104,7 @@ function runTransaction<T>(
 
 async function readRecords(): Promise<OfflineRecord[]> {
   try {
-    const records = await runTransaction<OfflineRecord[]>("readonly", (store) => store.getAll());
+    const records = await runStoreTransaction<OfflineRecord[]>(STORE_NAME, "readonly", (store) => store.getAll());
     return Array.isArray(records) ? records : [];
   } catch {
     return [];
@@ -104,7 +148,12 @@ export async function saveOfflineTrack(track: Track, blob: Blob): Promise<void> 
   });
 }
 
-export async function updateOfflineTrackArtwork(id: string, artwork: string): Promise<Track | null> {
+export async function updateOfflineTrackArtwork(
+  id: string,
+  artwork: string,
+  artworkSmall?: string,
+  artworkMeta?: ArtworkMetadata,
+): Promise<Track | null> {
   const db = await openDatabase();
   return new Promise<Track | null>((resolve, reject) => {
     const transaction = db.transaction(STORE_NAME, "readwrite");
@@ -121,7 +170,8 @@ export async function updateOfflineTrackArtwork(id: string, artwork: string): Pr
       updatedTrack = {
         ...existing.track,
         artwork,
-        artworkSmall: artwork,
+        artworkSmall: artworkSmall ?? artwork,
+        ...(artworkMeta ? { artworkMeta } : {}),
       };
       store.put({
         ...existing,
@@ -146,7 +196,7 @@ export async function removeOfflineTrack(id: string): Promise<void> {
 }
 
 export async function hasOfflineTrack(id: string): Promise<boolean> {
-  const record = await runTransaction<OfflineRecord | undefined>("readonly", (store) => store.get(id));
+  const record = await runStoreTransaction<OfflineRecord | undefined>(STORE_NAME, "readonly", (store) => store.get(id));
   return Boolean(record);
 }
 
@@ -163,6 +213,140 @@ export async function clearOfflineStorage(): Promise<void> {
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error ?? new Error("Offline storage could not be cleared."));
   });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Artwork Lookup & Deduplicated Blob Cache                                   */
+/* -------------------------------------------------------------------------- */
+
+export async function getArtworkLookup(lookupKey: string): Promise<OfflineArtworkLookupRecord | null> {
+  try {
+    const record = await runStoreTransaction<OfflineArtworkLookupRecord | undefined>(
+      ARTWORK_LOOKUP_STORE,
+      "readonly",
+      (store) => store.get(lookupKey),
+    );
+    return record ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveArtworkLookup(record: OfflineArtworkLookupRecord): Promise<void> {
+  try {
+    const db = await openDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(ARTWORK_LOOKUP_STORE, "readwrite");
+      transaction.objectStore(ARTWORK_LOOKUP_STORE).put(record);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error ?? new Error("Could not cache artwork lookup."));
+    });
+  } catch {
+    // Non-fatal: in-memory cache still operates when IndexedDB is blocked.
+  }
+}
+
+export async function deleteArtworkLookup(lookupKey: string): Promise<void> {
+  try {
+    const db = await openDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(ARTWORK_LOOKUP_STORE, "readwrite");
+      transaction.objectStore(ARTWORK_LOOKUP_STORE).delete(lookupKey);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error ?? new Error("Could not delete artwork lookup."));
+    });
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+export async function getArtworkBlob(key: string): Promise<OfflineArtworkBlobRecord | null> {
+  try {
+    const record = await runStoreTransaction<OfflineArtworkBlobRecord | undefined>(
+      ARTWORK_BLOB_STORE,
+      "readonly",
+      (store) => store.get(key),
+    );
+    if (!record || !(record.blob instanceof Blob) || record.blob.size === 0) return null;
+    return record;
+  } catch {
+    return null;
+  }
+}
+
+export async function touchArtworkBlob(key: string): Promise<void> {
+  try {
+    const db = await openDatabase();
+    await new Promise<void>((resolve) => {
+      const transaction = db.transaction(ARTWORK_BLOB_STORE, "readwrite");
+      const store = transaction.objectStore(ARTWORK_BLOB_STORE);
+      const getReq = store.get(key);
+      getReq.onsuccess = () => {
+        const existing = getReq.result as OfflineArtworkBlobRecord | undefined;
+        if (existing) {
+          store.put({ ...existing, lastAccessedAt: Date.now() });
+        }
+      };
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => resolve();
+    });
+  } catch {
+    // Ignore access-time update failures.
+  }
+}
+
+async function pruneArtworkBlobsIfNeeded(): Promise<void> {
+  try {
+    const all = await runStoreTransaction<OfflineArtworkBlobRecord[]>(
+      ARTWORK_BLOB_STORE,
+      "readonly",
+      (store) => store.getAll(),
+    );
+    if (!Array.isArray(all) || all.length === 0) return;
+
+    const totalBytes = all.reduce((sum, entry) => sum + (Number.isFinite(entry.bytes) ? entry.bytes : 0), 0);
+    if (all.length <= MAX_ARTWORK_BLOBS && totalBytes <= MAX_ARTWORK_BYTES) return;
+
+    const sorted = [...all].sort((a, b) => (a.lastAccessedAt || a.savedAt) - (b.lastAccessedAt || b.savedAt));
+    let remainingCount = all.length;
+    let remainingBytes = totalBytes;
+    const keysToDelete: string[] = [];
+
+    for (const entry of sorted) {
+      if (remainingCount <= MAX_ARTWORK_BLOBS && remainingBytes <= MAX_ARTWORK_BYTES) break;
+      keysToDelete.push(entry.key);
+      remainingCount -= 1;
+      remainingBytes -= Number.isFinite(entry.bytes) ? entry.bytes : 0;
+    }
+
+    if (!keysToDelete.length) return;
+    const db = await openDatabase();
+    await new Promise<void>((resolve) => {
+      const transaction = db.transaction(ARTWORK_BLOB_STORE, "readwrite");
+      const store = transaction.objectStore(ARTWORK_BLOB_STORE);
+      for (const key of keysToDelete) store.delete(key);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => resolve();
+    });
+  } catch {
+    // Ignore pruning errors.
+  }
+}
+
+export async function saveArtworkBlob(record: OfflineArtworkBlobRecord): Promise<void> {
+  if (!(record.blob instanceof Blob) || record.blob.size === 0) return;
+  try {
+    const db = await openDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(ARTWORK_BLOB_STORE, "readwrite");
+      transaction.objectStore(ARTWORK_BLOB_STORE).put(record);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error ?? new Error("Could not cache artwork image."));
+    });
+    await pruneArtworkBlobsIfNeeded();
+  } catch {
+    // Non-fatal: remote URL can still be used while online.
+  }
 }
 
 /** Human readable byte sizes for the storage panel. */

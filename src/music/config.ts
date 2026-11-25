@@ -9,7 +9,7 @@ import { PROVIDER_DOCS, PROVIDER_NAMES } from "./types/music";
  * optionally from a value the operator pastes into the app at runtime.
  */
 
-const env = import.meta.env as Record<string, string | undefined>;
+const env = ((import.meta as unknown as { env?: Record<string, string | undefined> }).env) ?? {};
 
 /** Audius only needs an app name for attribution and rate-limit bucketing. */
 export const AUDIUS_APP_NAME = (env.VITE_AUDIUS_APP_NAME ?? "aural").trim() || "aural";

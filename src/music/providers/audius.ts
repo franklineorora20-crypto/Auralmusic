@@ -81,6 +81,9 @@ export function mapAudiusTrack(source: unknown): Track | null {
   const downloadAllowed = resolveDownloadAllowed(source);
   const permalink = readString(source, "permalink");
 
+  const artwork = pickArtwork(source, "artwork");
+  const artworkSmall = pickSmallArtwork(source, "artwork");
+
   return {
     id: `audius-${providerTrackId}`,
     providerId: "audius",
@@ -91,8 +94,17 @@ export function mapAudiusTrack(source: unknown): Track | null {
     artistId: readString(user, "id") ? `audius-${readString(user, "id")}` : undefined,
     album: readString(backlink, "playlist_name") || "Single",
     albumId: readString(backlink, "playlist_id") ? `audius-${readString(backlink, "playlist_id")}` : undefined,
-    artwork: pickArtwork(source, "artwork"),
-    artworkSmall: pickSmallArtwork(source, "artwork"),
+    artwork,
+    artworkSmall,
+    ...(artwork ? {
+      artworkMeta: {
+        source: "audius" as const,
+        attribution: "Audius",
+        confidence: 80,
+        matchType: "provider" as const,
+        sourceUrl: artwork,
+      },
+    } : {}),
     duration: Math.max(0, readNumber(source, "duration")),
     streamUrl: `${AUDIUS_API}/tracks/${encodeURIComponent(providerTrackId)}/stream?app_name=${encodeURIComponent(AUDIUS_APP_NAME)}`,
     ...(downloadAllowed

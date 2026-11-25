@@ -4,7 +4,6 @@ import {
   ChevronRight,
   CornerLeftUp,
   Download,
-  FileAudio,
   Folder,
   FolderInput,
   FolderOpen,
@@ -28,6 +27,7 @@ import { isDisplayableImageUrl } from "../music/lib/mediaMetadata";
 import { formatBytes } from "../offline";
 import { useStore, type LibraryFolder } from "../store";
 import type { Track, View } from "../types";
+import { TrackArtwork } from "./TrackArtwork";
 
 type SystemNodeId =
   | "root"
@@ -786,12 +786,11 @@ export default function LibraryFileSystem({
                           onClick={() => onPlayTrack(track, directoryTracks)}
                         >
                           <span className="fs-file-icon" aria-hidden="true">
-                            {isDisplayableImageUrl(track.artwork) ? (
-                              <img className="fs-file-thumb" src={track.artwork} alt="" loading="lazy" />
-                            ) : playing ? (
-                              <Pause size={15} fill="currentColor" />
-                            ) : (
-                              <FileAudio size={16} />
+                            <TrackArtwork track={track} size="small" className="fs-file-thumb-art" />
+                            {playing && (
+                              <span className="fs-file-playing-badge">
+                                <Pause size={12} fill="currentColor" />
+                              </span>
                             )}
                           </span>
                           <span className="fs-file-copy">

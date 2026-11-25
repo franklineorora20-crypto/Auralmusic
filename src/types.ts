@@ -1,5 +1,8 @@
 export type {
   Artist,
+  ArtworkMatchType,
+  ArtworkMetadata,
+  ArtworkSource,
   GenreCategory,
   Playlist,
   ProviderId,

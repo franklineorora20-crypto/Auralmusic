@@ -37,6 +37,7 @@ function mapAudiusTrack(track: AudiusTrack): Track | null {
   if (!track.id || !track.title) return null;
   const downloadable = track.is_downloadable === true;
   const artwork = track.artwork?.["480x480"] || track.artwork?.["1000x1000"] || track.artwork?.["150x150"] || "";
+  const artworkSmall = track.artwork?.["150x150"] || artwork;
   return {
     id: `audius-${track.id}`,
     providerId: "audius",
@@ -48,7 +49,16 @@ function mapAudiusTrack(track: AudiusTrack): Track | null {
     duration: Number.isFinite(track.duration) ? Math.max(0, track.duration ?? 0) : 0,
     streamUrl: `${AUDIUS_API}/tracks/${encodeURIComponent(track.id)}/stream?app_name=${AUDIUS_APP_NAME}`,
     artwork,
-    artworkSmall: artwork,
+    artworkSmall,
+    ...(artwork ? {
+      artworkMeta: {
+        source: "audius" as const,
+        attribution: "Audius",
+        confidence: 80,
+        matchType: "provider" as const,
+        sourceUrl: artwork,
+      },
+    } : {}),
     genre: track.genre || "Other",
     tags: [],
     licensing: {
@@ -79,6 +89,15 @@ function mapJamendoTrack(track: JamendoTrack): Track | null {
     streamUrl: track.audio,
     artwork,
     artworkSmall: artwork,
+    ...(artwork ? {
+      artworkMeta: {
+        source: "jamendo" as const,
+        attribution: "Jamendo",
+        confidence: 80,
+        matchType: "provider" as const,
+        sourceUrl: artwork,
+      },
+    } : {}),
     genre: "Various",
     tags: [],
     licensing: {

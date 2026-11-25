@@ -95,6 +95,7 @@ export function mapJamendoTrack(source: unknown): Track | null {
     ...readArray(tags, "instruments"),
   ].filter((tag): tag is string => typeof tag === "string");
   const artistId = readString(source, "artist_id");
+  const artwork = jamendoArtwork(source);
 
   return {
     id: `jamendo-${providerTrackId}`,
@@ -106,8 +107,17 @@ export function mapJamendoTrack(source: unknown): Track | null {
     ...(artistId ? { artistId: `jamendo-${artistId}` } : {}),
     album: readString(source, "album_name") || "Single",
     ...(readString(source, "album_id") ? { albumId: `jamendo-${readString(source, "album_id")}` } : {}),
-    artwork: jamendoArtwork(source),
-    artworkSmall: jamendoArtwork(source),
+    artwork,
+    artworkSmall: artwork,
+    ...(artwork ? {
+      artworkMeta: {
+        source: "jamendo" as const,
+        attribution: "Jamendo",
+        confidence: 80,
+        matchType: "provider" as const,
+        sourceUrl: artwork,
+      },
+    } : {}),
     duration: Math.max(0, readNumber(source, "duration")),
     streamUrl: audio,
     ...(downloadUrl ? { downloadUrl } : {}),

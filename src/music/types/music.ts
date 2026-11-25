@@ -23,6 +23,37 @@ export type TrackLicensing = {
   note?: string;
 };
 
+export type ArtworkSource =
+  | "user"
+  | "embedded"
+  | "audius"
+  | "jamendo"
+  | "coverartarchive"
+  | "itunes"
+  | "deezer"
+  | "none";
+
+export type ArtworkMatchType =
+  | "user"
+  | "embedded"
+  | "provider"
+  | "album"
+  | "single"
+  | "compilation"
+  | "track";
+
+export type ArtworkMetadata = {
+  source: ArtworkSource;
+  attribution: string;
+  confidence: number;
+  matchType?: ArtworkMatchType;
+  releaseTitle?: string;
+  releaseArtist?: string;
+  mbid?: string;
+  sourceUrl?: string;
+  verifiedAt?: number;
+};
+
 export type TrackEmbeddedLyrics = {
   syncedLyrics?: string;
   plainLyrics?: string;
@@ -41,9 +72,11 @@ export type Track = {
   artistId?: string;
   album: string;
   albumId?: string;
-  /** Square artwork URL. Empty string when the provider has none. */
+  /** Artwork URL (or cached blob:/data: URL). Empty string when none exists. */
   artwork: string;
   artworkSmall: string;
+  /** Provenance and verification confidence for the current artwork. */
+  artworkMeta?: ArtworkMetadata;
   duration: number;
   /** Playback identifier handed to the audio engine. */
   streamUrl: string;

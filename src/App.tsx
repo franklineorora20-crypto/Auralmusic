@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import CRTWarp from "./components/CRTWarp";
 import Ferrofluid from "./components/Ferrofluid";
 import { getCrtPreset } from "./components/crtPresets";
@@ -13,6 +13,7 @@ import LibraryFileSystem from "./components/LibraryFileSystem";
 import LyricsPanel from "./components/LyricsPanel";
 import { CrumpledAppScreen, PaperTossOverlay, playPaperRustle, type PaperTossItem } from "./components/PaperStage";
 import { OfflineIndicator, PWAInstallButton } from "./components/PWAInstallButton";
+import { PlaylistArtwork, TrackArtwork } from "./components/TrackArtwork";
 import { isDisplayableImageUrl } from "./music/lib/mediaMetadata";
 import {
   registerMediaSessionHandlers,
@@ -33,24 +34,6 @@ const formatTime = (seconds: number) => {
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
 };
-
-/** Memoised so time updates in the player don't re-render every visible row. */
-const Artwork = memo(function Artwork({ track, size = "card", className = "" }: { track: Track; size?: "card" | "small" | "hero"; className?: string }) {
-  return <div className={`artwork artwork-${size} ${className}`} style={{ background: track.accent }} aria-label={`${track.album} artwork`}>
-    {isDisplayableImageUrl(track.artwork)
-      ? <img
-          src={track.artwork}
-          alt=""
-          loading="lazy"
-          decoding="async"
-          width={size === "small" ? 56 : size === "hero" ? 300 : 400}
-          height={size === "small" ? 56 : size === "hero" ? 300 : 400}
-          onError={(event) => { event.currentTarget.style.display = "none"; }}
-        />
-      : null}
-    <span aria-hidden="true">{track.title.split(" ").map((word) => word[0]).join("").slice(0, 2)}</span>
-  </div>;
-});
 
 function AuralApp() {
   const store = useStore();
@@ -712,7 +695,7 @@ function AuralApp() {
           </button>
         )}
         <button className="track-main" onClick={() => playTrack(track, collection)}>
-          <Artwork track={track} size="small" />
+          <TrackArtwork track={track} size="small" />
           <span>
             <strong>{track.title}</strong>
             <small>{track.artist}{track.providerId === "sample" ? " · Sample preview" : track.providerId === "audius" ? " · Audius" : track.providerId === "jamendo" ? " · Jamendo" : ""}</small>
@@ -776,7 +759,7 @@ function AuralApp() {
           return (
             <article className={`music-card ${isCurrentTrack ? "is-current" : ""}`} key={track.id}>
               <button className="cover-button" onClick={() => playTrack(track, tracks)} aria-label={isTrackPlaying ? `Pause ${track.title}` : `Play ${track.title}`}>
-                <Artwork track={track} />
+                <TrackArtwork track={track} />
                 <span className={`card-play ${isTrackPlaying ? "is-playing" : ""}`}>
                   {isTrackPlaying ? <Pause size={16} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
                 </span>
@@ -820,7 +803,7 @@ function AuralApp() {
       <section className="quick-grid">
         {recentTracks.slice(0, 6).map((track) => (
           <button className="quick-card" key={track.id} onClick={() => playTrack(track)}>
-            <Artwork track={track} size="small" />
+            <TrackArtwork track={track} size="small" />
             <strong>{track.album && track.album !== "Single" && track.album !== "Imported" ? track.album : track.title}{track.providerId === "sample" ? " · Sample" : ""}</strong>
             <span className="quick-play"><Play size={16} fill="currentColor" /></span>
           </button>
@@ -861,7 +844,7 @@ function AuralApp() {
                     </span>
                   </span>
                   <span className="hero-actions">
-                    <Artwork track={hero} size="hero" />
+                    <TrackArtwork track={hero} size="hero" />
                   </span>
                 </button>
               </section>
@@ -972,15 +955,20 @@ function AuralApp() {
       <section className="content-section">
         <div className="section-heading"><h2>Playlists</h2></div>
         <div className="playlist-grid">
-          {store.playlists.map((playlist) => (
-            <article className="playlist-card" key={playlist.id}>
-              <button className="playlist-cover" onClick={() => navigate("playlist", playlist.id)} aria-label={`Open ${playlist.name}`}>
-                <span><ListMusic size={28} /></span>
-              </button>
-              <button onClick={() => navigate("playlist", playlist.id)}><strong>{playlist.name}</strong><small>{playlist.trackIds.length} tracks</small></button>
-              <button className={`icon-button ${store.likedPlaylistIds.includes(playlist.id) ? "active" : ""}`} onClick={() => store.togglePlaylistLike(playlist.id)} aria-label="Like playlist"><Heart size={16} fill={store.likedPlaylistIds.includes(playlist.id) ? "currentColor" : "none"} /></button>
-            </article>
-          ))}
+          {store.playlists.map((playlist) => {
+            const playlistTracks = playlist.trackIds
+              .map((id) => store.tracks.find((track) => track.id === id))
+              .filter((track): track is Track => Boolean(track));
+            return (
+              <article className="playlist-card" key={playlist.id}>
+                <button className="playlist-cover" onClick={() => navigate("playlist", playlist.id)} aria-label={`Open ${playlist.name}`}>
+                  <PlaylistArtwork tracks={playlistTracks} variant="card" />
+                </button>
+                <button onClick={() => navigate("playlist", playlist.id)}><strong>{playlist.name}</strong><small>{playlist.trackIds.length} tracks</small></button>
+                <button className={`icon-button ${store.likedPlaylistIds.includes(playlist.id) ? "active" : ""}`} onClick={() => store.togglePlaylistLike(playlist.id)} aria-label="Like playlist"><Heart size={16} fill={store.likedPlaylistIds.includes(playlist.id) ? "currentColor" : "none"} /></button>
+              </article>
+            );
+          })}
         </div>
         {!store.playlists.length && <div className="empty-state"><ListMusic size={24} /><h3>Your playlists will show up here</h3><p>Create a playlist and add music from search or discovery.</p></div>}
       </section>
@@ -991,7 +979,7 @@ function AuralApp() {
             {store.savedAlbumIds.map((albumName) => {
               const albumTrack = store.tracks.find((track) => track.album === albumName);
               return albumTrack ? <button className="music-card saved-album-card" key={albumName} onClick={() => navigate("album", albumName)}>
-                <Artwork track={albumTrack} /><strong>{albumName}</strong><small>{albumTrack.artist}</small>
+                <TrackArtwork track={albumTrack} /><strong>{albumName}</strong><small>{albumTrack.artist}</small>
               </button> : null;
             })}
           </div>
@@ -1065,7 +1053,7 @@ function AuralApp() {
       <div className="page detail-page page-enter" key={`artist-${selectedId}`}>
         <section className="detail-hero artist-hero" style={{ "--accent": artist.accent } as React.CSSProperties}>
           <button className="back-button" onClick={() => navigateHistory(-1)} aria-label="Go back"><ArrowLeft size={18} /></button>
-          <Artwork track={artist} size="hero" className="artist-artwork" />
+          <TrackArtwork track={artist} size="hero" className="artist-artwork" />
           <div><p className="eyebrow">Artist</p><h1>{artist.artist}</h1>
             <p>{artistTracks.length} track{artistTracks.length === 1 ? "" : "s"} · {albums.length} album{albums.length === 1 ? "" : "s"} · {formatTime(totalDuration)} total</p>
             <div className="detail-actions">
@@ -1089,7 +1077,7 @@ function AuralApp() {
                 return albumTrack ? (
                   <article className="music-card" key={albumName}>
                     <button className="cover-button" onClick={() => navigate("album", albumName)} aria-label={`Open ${albumName}`}>
-                      <Artwork track={albumTrack} />
+                      <TrackArtwork track={albumTrack} />
                     </button>
                     <button className="card-copy" onClick={() => navigate("album", albumName)}>
                       <strong>{albumName}</strong>
@@ -1116,14 +1104,17 @@ function AuralApp() {
       <div className="page detail-page page-enter" key={`album-${selectedId}`}>
         <section className="detail-hero" style={{ "--accent": album.accent } as React.CSSProperties}>
           <button className="back-button" onClick={() => navigateHistory(-1)} aria-label="Go back"><ArrowLeft size={18} /></button>
-          <Artwork track={album} size="hero" />
+          <TrackArtwork track={album} size="hero" />
           <div><p className="eyebrow">Album</p><h1>{album.album}</h1>
             <p>By <button className="text-link" onClick={() => navigate("artist", album.artist)}>{album.artist}</button>{releaseYear ? ` · ${releaseYear}` : ""} · {albumTracks.length} track{albumTracks.length === 1 ? "" : "s"} · {formatTime(totalDuration)}</p>
-            {album.genre && (
+            {(album.genre || album.artworkMeta?.attribution) && (
               <p className="hero-genre">
-                <span>{album.genre}</span>
+                {album.genre && <span>{album.genre}</span>}
                 {downloadableCount > 0 && <><span aria-hidden="true">·</span><span className="hero-genre-accent">{downloadableCount} downloadable</span></>}
                 {album.providerId !== "sample" && <><span aria-hidden="true">·</span><span>via {album.providerName}</span></>}
+                {album.artworkMeta?.attribution && album.artworkMeta.source !== "none" && (
+                  <><span aria-hidden="true">·</span><span className="artwork-source-note">Cover: {album.artworkMeta.attribution}</span></>
+                )}
               </p>
             )}
             <div className="detail-actions">
@@ -1134,6 +1125,11 @@ function AuralApp() {
               <button className={`secondary-button ${store.savedAlbumIds.includes(album.album) ? "active" : ""}`} onClick={() => store.toggleSavedAlbum(album.album)}>
                 {store.savedAlbumIds.includes(album.album) ? "Saved album" : "Save album"}
               </button>
+              {(album.imported || downloadedIds.has(album.id) || !isDisplayableImageUrl(album.artwork)) && (
+                <button className="secondary-button" onClick={() => setCoverEditTrackId(album.id)}>
+                  <ImagePlus size={16} /> Cover art
+                </button>
+              )}
             </div>
           </div>
         </section>
@@ -1150,7 +1146,7 @@ function AuralApp() {
       <div className="page detail-page page-enter" key={`playlist-${selectedId}`}>
         <section className="detail-hero playlist-hero" style={{ "--accent": "#5b7c65" } as React.CSSProperties}>
           <button className="back-button" onClick={() => navigate("library")} aria-label="Go back"><ArrowLeft size={18} /></button>
-          <div className="playlist-art"><ListMusic size={48} /></div>
+          <PlaylistArtwork tracks={tracks} variant="hero" />
           <div>
             <p className="eyebrow">Playlist</p>
             <h1 contentEditable suppressContentEditableWarning onBlur={(event) => store.renamePlaylist(playlist.id, event.currentTarget.textContent ?? "")}>{playlist.name}</h1>
@@ -1276,7 +1272,7 @@ function AuralApp() {
       >
         <div className="now-playing">
           <button className="np-thumb-trigger" onClick={() => setExpandedPlayer(true)} aria-label="Open now playing view">
-            <Artwork track={current} size="small" />
+            <TrackArtwork track={current} size="small" />
           </button>
           <div key={current.id} className="np-track-unfold"><strong>{current.title}</strong><button onClick={() => navigate("artist", current.artist)}>{current.artist}{current.providerId === "sample" ? " · Sample preview" : ""}</button></div>
           <button className={`icon-button ${store.favouriteIds.includes(current.id) ? "active" : ""}`} onClick={() => store.toggleFavourite(current.id)} aria-label="Favourite current track"><Heart size={17} fill={store.favouriteIds.includes(current.id) ? "currentColor" : "none"} /></button>
@@ -1411,11 +1407,14 @@ function AuralApp() {
           <div className="now-playing-layout">
             <div className="now-playing-view">
               <div key={`art-${current.id}`} className={`np-artwork-frame np-track-unfold ${crtVisualizer ? "has-crt" : ""}`}>
-                <Artwork track={current} size="hero" />
+                <TrackArtwork track={current} size="hero" />
               </div>
               <div key={`meta-${current.id}`} className="np-meta np-track-unfold">
                 <strong>{current.title}</strong>
                 <button onClick={() => { setExpandedPlayer(false); navigate("artist", current.artist); }}>{current.artist}</button>
+                {current.artworkMeta?.attribution && current.artworkMeta.source !== "none" && (
+                  <small className="artwork-source-note">{current.artworkMeta.attribution}</small>
+                )}
               </div>
               <div className="progress-row">
                 <span>{formatTime(currentTime)}</span>
@@ -1509,6 +1508,9 @@ function AuralApp() {
             setImportMessage(dataUrl ? "Cover picture saved." : "Cover picture removed.");
             window.setTimeout(() => setImportMessage(""), 3000);
           }}
+          onAutoFindArtwork={async (trackId) => {
+            await store.requestTrackArtwork(trackId, { forceRefresh: true });
+          }}
         />
       )}
 
@@ -1518,7 +1520,7 @@ function AuralApp() {
           <div className="queue-list">
             {current && (
               <div className="queue-item now-playing-item" aria-current="true">
-                <Artwork track={current} size="small" />
+                <TrackArtwork track={current} size="small" />
                 <div className="queue-item-copy"><strong>{current.title}</strong><small>{current.artist} · Now playing</small></div>
                 {isPlaying && <span className="queue-equalizer" aria-hidden="true"><span /><span /><span /></span>}
               </div>
@@ -1527,7 +1529,7 @@ function AuralApp() {
             {queueTracks.map((track, index) => (
               <div className="queue-item" key={track.id}>
                 <span className="queue-index">{index + 1}</span>
-                <Artwork track={track} size="small" />
+                <TrackArtwork track={track} size="small" />
                 <button className="queue-item-copy" onClick={() => playTrack(track)}><strong>{track.title}</strong><small>{track.artist}</small></button>
                 <div className="queue-reorder">
                   <button className="icon-button" disabled={index === 0} onClick={() => store.setQueue(store.queueIds.map((id, i, arr) => i === index ? arr[index - 1] : i === index - 1 ? arr[index] : id))} aria-label={`Move ${track.title} up in queue`}><ChevronUp size={13} /></button>
