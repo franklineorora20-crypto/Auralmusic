@@ -22,9 +22,13 @@ export default defineConfig({
         theme_color: "#100f0d",
         background_color: "#100f0d",
         display: "standalone",
+        display_override: ["standalone", "minimal-ui"],
+        categories: ["music", "audio", "entertainment"],
+        prefer_related_applications: false,
         start_url: "/",
         scope: "/",
         orientation: "any",
+        ...({ launch_handler: { client_mode: "focus-existing" } } as Record<string, unknown>),
         icons: [
           {
             src: "/pwa-192x192.png",

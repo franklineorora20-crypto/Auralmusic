@@ -1611,6 +1611,63 @@ button { border: 0; cursor: pointer; color: inherit; background: transparent; }
 .install-modal-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 4px; }
 .install-modal-actions a { text-decoration: none; }
 
+.device-permissions-card {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 16px 18px;
+}
+.device-permissions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.device-permissions-actions { flex: 0 0 auto; }
+.device-permissions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(195px, 1fr));
+  gap: 10px;
+}
+.permission-pill {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--bg);
+  text-align: left;
+  color: var(--text-2);
+  min-width: 0;
+}
+.permission-pill svg { flex: 0 0 auto; color: var(--text-3); }
+.permission-pill > div { display: grid; gap: 2px; min-width: 0; }
+.permission-pill strong { font-size: 12.5px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.permission-pill small { font-size: 11.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.permission-pill.is-granted {
+  border-color: rgba(120, 163, 124, 0.3);
+  background: rgba(120, 163, 124, 0.08);
+}
+.permission-pill.is-granted svg { color: #a9d1ad; }
+.permission-pill.is-denied {
+  border-color: rgba(216, 138, 132, 0.28);
+}
+.permission-pill.is-denied svg { color: #e6a9a4; }
+.permission-toggle {
+  cursor: pointer;
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+.permission-toggle:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: var(--panel-2);
+}
+.permission-toggle:disabled { opacity: 0.6; cursor: not-allowed; }
+
 .offline-indicator {
   position: fixed;
   left: 20px;

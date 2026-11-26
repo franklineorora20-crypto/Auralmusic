@@ -44,6 +44,16 @@ test("buildMediaMetadataInit uses track artwork when present and falls back to P
     { src: "https://aural.app/pwa-512x512.png", sizes: "512x512", type: "image/png" },
     { src: "https://aural.app/pwa-192x192.png", sizes: "192x192", type: "image/png" },
   ]);
+
+  const blobArt = buildMediaMetadataInit(
+    makeTrack({ artwork: "blob:https://aural.app/cover-1", artworkSmall: "" }),
+    "https://aural.app",
+  );
+  assert.deepEqual(blobArt.artwork, [
+    { src: "blob:https://aural.app/cover-1", sizes: "512x512" },
+    { src: "https://aural.app/pwa-512x512.png", sizes: "512x512", type: "image/png" },
+    { src: "https://aural.app/pwa-192x192.png", sizes: "192x192", type: "image/png" },
+  ]);
 });
 
 test("clampPositionState validates and bounds lock-screen scrubber state", () => {

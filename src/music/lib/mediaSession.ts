@@ -43,7 +43,11 @@ export function buildMediaMetadataInit(track: Track, origin?: string): MediaMeta
   if (isDisplayableImageUrl(track.artworkSmall) && track.artworkSmall !== track.artwork) {
     artwork.push({ src: track.artworkSmall, sizes: "192x192" });
   }
-  if (!artwork.length) {
+  // OS lock-screen / notification processes cannot always read renderer-scoped
+  // blob: URLs; append static PWA icons as reliable fallbacks.
+  const onlyBlobArtwork =
+    artwork.length > 0 && artwork.every((entry) => entry.src.startsWith("blob:"));
+  if (!artwork.length || onlyBlobArtwork) {
     artwork.push(
       { src: resolveAppAsset("/pwa-512x512.png", origin), sizes: "512x512", type: "image/png" },
       { src: resolveAppAsset("/pwa-192x192.png", origin), sizes: "192x192", type: "image/png" },
@@ -75,11 +79,25 @@ export function syncMediaSessionMetadata(track: Track | undefined): void {
   if (!track || typeof navigator === "undefined" || !("mediaSession" in navigator) || typeof MediaMetadata === "undefined") {
     return;
   }
+  const origin = typeof window !== "undefined" ? window.location.origin : undefined;
+  const init = buildMediaMetadataInit(track, origin);
   try {
-    const origin = typeof window !== "undefined" ? window.location.origin : undefined;
-    navigator.mediaSession.metadata = new MediaMetadata(buildMediaMetadataInit(track, origin));
+    navigator.mediaSession.metadata = new MediaMetadata(init);
   } catch {
-    // Some browsers reject uncommon artwork schemes; ignore safely.
+    // Retry with safe static PWA icons if the OS rejects a track artwork URL.
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: init.title,
+        artist: init.artist,
+        album: init.album,
+        artwork: [
+          { src: resolveAppAsset("/pwa-512x512.png", origin), sizes: "512x512", type: "image/png" },
+          { src: resolveAppAsset("/pwa-192x192.png", origin), sizes: "192x192", type: "image/png" },
+        ],
+      });
+    } catch {
+      // Ignore unsupported MediaMetadata environments.
+    }
   }
 }
 
@@ -96,8 +114,11 @@ export function syncMediaSessionPosition(duration: number, position: number): vo
   if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
   if (typeof navigator.mediaSession.setPositionState !== "function") return;
   const state = clampPositionState(duration, position);
-  if (!state) return;
   try {
+    if (!state) {
+      navigator.mediaSession.setPositionState();
+      return;
+    }
     navigator.mediaSession.setPositionState(state);
   } catch {
     // Ignore transient duration mismatches during track switching.

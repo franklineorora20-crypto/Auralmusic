@@ -12,8 +12,20 @@ import CoverArtModal from "./components/CoverArtModal";
 import LibraryFileSystem from "./components/LibraryFileSystem";
 import LyricsPanel from "./components/LyricsPanel";
 import { CrumpledAppScreen, PaperTossOverlay, playPaperRustle, type PaperTossItem } from "./components/PaperStage";
+import { DevicePermissionsCard } from "./components/DevicePermissionsCard";
 import { OfflineIndicator, PWAInstallButton } from "./components/PWAInstallButton";
 import { PlaylistArtwork, TrackArtwork } from "./components/TrackArtwork";
+import {
+  backgroundAudioBridge,
+  ensurePlaybackAudioSession,
+  isAudioAbortError,
+  readDevicePermissionsSnapshot,
+  requestNotificationPermission,
+  requestPersistentStoragePermission,
+  shouldHoldWakeLock,
+  wakeLockController,
+  type DevicePermissionsSnapshot,
+} from "./music/lib/devicePermissions";
 import { isDisplayableImageUrl } from "./music/lib/mediaMetadata";
 import {
   registerMediaSessionHandlers,
@@ -117,6 +129,25 @@ function AuralApp() {
     try { localStorage.setItem("aural-crt", JSON.stringify(crtVisualizer)); } catch { /* storage unavailable */ }
   }, [crtVisualizer]);
 
+  const [wakeLockEnabled, setWakeLockEnabled] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("aural-wakelock") ?? "true") as boolean; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("aural-wakelock", JSON.stringify(wakeLockEnabled)); } catch { /* storage unavailable */ }
+  }, [wakeLockEnabled]);
+
+  const [devicePermissions, setDevicePermissions] = useState<DevicePermissionsSnapshot>(() => ({
+    audioSession: "unsupported",
+    mediaSession: typeof navigator !== "undefined" && "mediaSession" in navigator ? "active" : "unsupported",
+    persistentStorage: "prompt",
+    notifications: "prompt",
+    wakeLockSupported: typeof navigator !== "undefined" && "wakeLock" in navigator,
+    wakeLockEnabled,
+    wakeLockActive: false,
+    keepAliveActive: false,
+  }));
+  const [requestingPermissions, setRequestingPermissions] = useState(false);
+
   const [shuffleOrder, setShuffleOrder] = useState<string[]>([]);
   const playHistoryRef = useRef<string[]>([]);
   const crossfadeRef = useRef<HTMLAudioElement | null>(null);
@@ -126,6 +157,86 @@ function AuralApp() {
   const importTargetFolderRef = useRef<string | null>(null);
   const loadMoreController = useRef<AbortController | null>(null);
   const loadedTrackIdRef = useRef(currentId);
+  const trackSwitchingRef = useRef(false);
+  const trackSwitchTimerRef = useRef<number | null>(null);
+
+  const clearTrackSwitchGuard = () => {
+    trackSwitchingRef.current = false;
+    if (trackSwitchTimerRef.current !== null) {
+      window.clearTimeout(trackSwitchTimerRef.current);
+      trackSwitchTimerRef.current = null;
+    }
+  };
+
+  const beginTrackSwitchGuard = () => {
+    trackSwitchingRef.current = true;
+    if (trackSwitchTimerRef.current !== null) {
+      window.clearTimeout(trackSwitchTimerRef.current);
+    }
+    trackSwitchTimerRef.current = window.setTimeout(() => {
+      trackSwitchingRef.current = false;
+      trackSwitchTimerRef.current = null;
+    }, 5000);
+  };
+
+  const refreshDevicePermissions = async () => {
+    const next = await readDevicePermissionsSnapshot(wakeLockEnabled);
+    setDevicePermissions(next);
+  };
+
+  useEffect(() => {
+    ensurePlaybackAudioSession();
+    void refreshDevicePermissions();
+    if (pwa.isInstalled) {
+      void requestPersistentStoragePermission().then(() => refreshDevicePermissions());
+    }
+    return () => {
+      clearTrackSwitchGuard();
+      void wakeLockController.release();
+      void backgroundAudioBridge.stop();
+    };
+  }, []);
+
+  useEffect(() => {
+    const syncWake = async () => {
+      if (shouldHoldWakeLock(isPlaying, wakeLockEnabled)) {
+        await wakeLockController.acquire();
+      } else {
+        await wakeLockController.release();
+      }
+      await refreshDevicePermissions();
+    };
+    void syncWake();
+
+    const onVisibility = () => {
+      if (document.visibilityState === "visible" && shouldHoldWakeLock(isPlaying, wakeLockEnabled)) {
+        void wakeLockController.acquire().then(() => refreshDevicePermissions());
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [isPlaying, wakeLockEnabled]);
+
+  const grantAllDevicePermissions = async () => {
+    setRequestingPermissions(true);
+    try {
+      ensurePlaybackAudioSession();
+      if (isPlaying) {
+        await backgroundAudioBridge.start();
+      }
+      await requestPersistentStoragePermission();
+      await requestNotificationPermission();
+      setWakeLockEnabled(true);
+      if (isPlaying) {
+        await wakeLockController.acquire();
+      }
+      await refreshDevicePermissions();
+      setImportMessage("Device & lock-screen playback permissions updated.");
+      window.setTimeout(() => setImportMessage(""), 3500);
+    } finally {
+      setRequestingPermissions(false);
+    }
+  };
 
   const current = store.tracks.find((track) => track.id === currentId) ?? store.tracks[0];
   const recentTracks = store.recentIds.map((id) => store.tracks.find((track) => track.id === id)).filter((track): track is Track => Boolean(track));
@@ -249,15 +360,25 @@ function AuralApp() {
             store.setQueue([...store.queueIds, nextTrack.id]);
           }
           loadedTrackIdRef.current = nextTrack.id;
+          beginTrackSwitchGuard();
+          ensurePlaybackAudioSession();
+          syncMediaSessionMetadata(nextTrack);
+          syncMediaSessionPlaybackState(true);
           setCurrentId(nextTrack.id);
           store.addRecent(nextTrack.id);
           setCurrentTime(0);
+          setDuration(nextTrack.duration ?? 0);
           setIsPlaying(true);
           const primaryAfter = audioRef.current;
           if (primaryAfter) {
             primaryAfter.volume = startVolume;
             primaryAfter.src = nextTrack.streamUrl;
-            void primaryAfter.play().catch(() => setIsPlaying(false));
+            void primaryAfter.play().catch((error) => {
+              if (!isAudioAbortError(error)) {
+                clearTrackSwitchGuard();
+                setIsPlaying(false);
+              }
+            });
           }
           ghost.pause();
           ghost.src = "";
@@ -381,26 +502,51 @@ function AuralApp() {
     if (!audioRef.current) return;
     if (loadedTrackIdRef.current === currentId) return;
     loadedTrackIdRef.current = currentId;
-    audioRef.current.load();
     if (isPlaying) {
-      void audioRef.current.play().catch(() => setIsPlaying(false));
+      beginTrackSwitchGuard();
+      ensurePlaybackAudioSession();
+      void backgroundAudioBridge.start();
+      void audioRef.current.play().catch((error) => {
+        if (isAudioAbortError(error)) return;
+        clearTrackSwitchGuard();
+        setIsPlaying(false);
+      });
+    } else {
+      audioRef.current.load();
     }
   }, [currentId, isPlaying]);
 
   const switchToTrack = (trackId: string, autoplay = true) => {
     const nextTrack = store.tracks.find((track) => track.id === trackId);
     loadedTrackIdRef.current = trackId;
+    if (autoplay) {
+      beginTrackSwitchGuard();
+      ensurePlaybackAudioSession();
+      void backgroundAudioBridge.start();
+      if (nextTrack) {
+        syncMediaSessionMetadata(nextTrack);
+        syncMediaSessionPlaybackState(true);
+        syncMediaSessionPosition(nextTrack.duration ?? 0, 0);
+      }
+    } else {
+      clearTrackSwitchGuard();
+    }
     setCurrentId(trackId);
     store.addRecent(trackId);
     setCurrentTime(0);
+    setDuration(nextTrack?.duration ?? 0);
     setPlaybackError("");
     if (audioRef.current && nextTrack) {
       audioRef.current.src = nextTrack.streamUrl;
-      audioRef.current.load();
       if (autoplay) {
         setIsPlaying(true);
-        void audioRef.current.play().catch(() => setIsPlaying(false));
+        void audioRef.current.play().catch((error) => {
+          if (isAudioAbortError(error) || loadedTrackIdRef.current !== trackId) return;
+          clearTrackSwitchGuard();
+          setIsPlaying(false);
+        });
       } else {
+        audioRef.current.load();
         setIsPlaying(false);
       }
     } else {
@@ -428,8 +574,17 @@ function AuralApp() {
     store.addRecent(track.id);
     if (track.id === currentId) {
       if (audioRef.current) {
-        if (isPlaying) audioRef.current.pause();
-        else void audioRef.current.play().catch(() => setIsPlaying(false));
+        if (isPlaying) {
+          clearTrackSwitchGuard();
+          audioRef.current.pause();
+          void backgroundAudioBridge.stop();
+        } else {
+          ensurePlaybackAudioSession();
+          void backgroundAudioBridge.start();
+          void audioRef.current.play().catch((error) => {
+            if (!isAudioAbortError(error)) setIsPlaying(false);
+          });
+        }
       }
       setIsPlaying((playing) => !playing);
     } else {
@@ -465,7 +620,11 @@ function AuralApp() {
     if (firstTrack.id === currentId) {
       seekToTime(0);
       if (audioRef.current && !isPlaying) {
-        void audioRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+        ensurePlaybackAudioSession();
+        void backgroundAudioBridge.start();
+        void audioRef.current.play().then(() => setIsPlaying(true)).catch((error) => {
+          if (!isAudioAbortError(error)) setIsPlaying(false);
+        });
       }
     } else {
       if (currentId) {
@@ -479,10 +638,16 @@ function AuralApp() {
   const togglePlayback = () => {
     if (!audioRef.current) return;
     if (isPlaying) {
+      clearTrackSwitchGuard();
       audioRef.current.pause();
+      void backgroundAudioBridge.stop();
       setIsPlaying(false);
     } else {
-      void audioRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+      ensurePlaybackAudioSession();
+      void backgroundAudioBridge.start();
+      void audioRef.current.play().then(() => setIsPlaying(true)).catch((error) => {
+        if (!isAudioAbortError(error)) setIsPlaying(false);
+      });
     }
   };
 
@@ -508,13 +673,25 @@ function AuralApp() {
       recentIds: store.recentIds,
     });
     if (!nextId) {
+      clearTrackSwitchGuard();
       audioRef.current?.pause();
+      void backgroundAudioBridge.stop();
       setIsPlaying(false);
       return;
     }
     if (nextId === currentId && store.repeat === "all" && audioRef.current) {
+      beginTrackSwitchGuard();
+      ensurePlaybackAudioSession();
+      void backgroundAudioBridge.start();
       audioRef.current.currentTime = 0;
-      void audioRef.current.play().catch(() => setIsPlaying(false));
+      setIsPlaying(true);
+      syncMediaSessionPlaybackState(true);
+      void audioRef.current.play().catch((error) => {
+        if (!isAudioAbortError(error)) {
+          clearTrackSwitchGuard();
+          setIsPlaying(false);
+        }
+      });
       return;
     }
     if (currentId && currentId !== nextId) {
@@ -555,8 +732,18 @@ function AuralApp() {
 
   const handleEnded = () => {
     if (store.repeat === "one" && audioRef.current) {
+      beginTrackSwitchGuard();
+      ensurePlaybackAudioSession();
+      void backgroundAudioBridge.start();
       audioRef.current.currentTime = 0;
-      void audioRef.current.play();
+      setIsPlaying(true);
+      syncMediaSessionPlaybackState(true);
+      void audioRef.current.play().catch((error) => {
+        if (!isAudioAbortError(error)) {
+          clearTrackSwitchGuard();
+          setIsPlaying(false);
+        }
+      });
       return;
     }
     if (!autoplayEnabled && store.repeat === "off") {
@@ -565,7 +752,9 @@ function AuralApp() {
         store.queueIds.length > 1 &&
         (store.shuffle || (currentInQueue >= 0 && currentInQueue < store.queueIds.length - 1));
       if (!hasQueuedNext) {
+        clearTrackSwitchGuard();
         audioRef.current?.pause();
+        void backgroundAudioBridge.stop();
         setIsPlaying(false);
         return;
       }
@@ -576,10 +765,17 @@ function AuralApp() {
   const mediaHandlersRef = useRef({
     play: () => {
       if (!audioRef.current) return;
-      void audioRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+      ensurePlaybackAudioSession();
+      void backgroundAudioBridge.start();
+      syncMediaSessionPlaybackState(true);
+      void audioRef.current.play().then(() => setIsPlaying(true)).catch((error) => {
+        if (!isAudioAbortError(error)) setIsPlaying(false);
+      });
     },
     pause: () => {
+      clearTrackSwitchGuard();
       audioRef.current?.pause();
+      void backgroundAudioBridge.stop();
       setIsPlaying(false);
     },
     next: playNext,
@@ -588,7 +784,9 @@ function AuralApp() {
     seekBackward: (offset: number) => seekToTime(Math.max(0, (audioRef.current?.currentTime ?? currentTime) - offset)),
     seekForward: (offset: number) => seekToTime((audioRef.current?.currentTime ?? currentTime) + offset),
     stop: () => {
+      clearTrackSwitchGuard();
       audioRef.current?.pause();
+      void backgroundAudioBridge.stop();
       seekToTime(0);
       setIsPlaying(false);
     },
@@ -596,10 +794,17 @@ function AuralApp() {
   mediaHandlersRef.current = {
     play: () => {
       if (!audioRef.current) return;
-      void audioRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+      ensurePlaybackAudioSession();
+      void backgroundAudioBridge.start();
+      syncMediaSessionPlaybackState(true);
+      void audioRef.current.play().then(() => setIsPlaying(true)).catch((error) => {
+        if (!isAudioAbortError(error)) setIsPlaying(false);
+      });
     },
     pause: () => {
+      clearTrackSwitchGuard();
       audioRef.current?.pause();
+      void backgroundAudioBridge.stop();
       setIsPlaying(false);
     },
     next: playNext,
@@ -608,7 +813,9 @@ function AuralApp() {
     seekBackward: (offset: number) => seekToTime(Math.max(0, (audioRef.current?.currentTime ?? currentTime) - offset)),
     seekForward: (offset: number) => seekToTime((audioRef.current?.currentTime ?? currentTime) + offset),
     stop: () => {
+      clearTrackSwitchGuard();
       audioRef.current?.pause();
+      void backgroundAudioBridge.stop();
       seekToTime(0);
       setIsPlaying(false);
     },
@@ -1217,6 +1424,13 @@ function AuralApp() {
         </div>
       </div>
       <PWAInstallButton pwa={pwa} variant="card" />
+      <DevicePermissionsCard
+        permissions={devicePermissions}
+        wakeLockEnabled={wakeLockEnabled}
+        onToggleWakeLock={(enabled) => setWakeLockEnabled(enabled)}
+        onGrantAll={grantAllDevicePermissions}
+        requesting={requestingPermissions}
+      />
       <div className="storage-card">
         <HardDrive size={19} />
         <div><strong>{store.downloads.length} offline track{store.downloads.length === 1 ? "" : "s"}</strong><small>{(store.storageUsage / (1024 * 1024)).toFixed(1)} MB stored in this browser</small></div>
@@ -1537,12 +1751,29 @@ function AuralApp() {
         src={current.streamUrl}
         preload="auto"
         playsInline
-        onPlay={() => { setIsPlaying(true); setPlaybackError(""); }}
-        onPause={() => setIsPlaying(false)}
+        onPlay={() => {
+          clearTrackSwitchGuard();
+          ensurePlaybackAudioSession();
+          void backgroundAudioBridge.start();
+          setIsPlaying(true);
+          setPlaybackError("");
+        }}
+        onPlaying={() => {
+          clearTrackSwitchGuard();
+          setIsPlaying(true);
+          setPlaybackError("");
+        }}
+        onPause={(event) => {
+          if (trackSwitchingRef.current || event.currentTarget.ended) return;
+          setIsPlaying(false);
+          void backgroundAudioBridge.stop();
+        }}
         onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
         onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)}
         onError={() => {
+          clearTrackSwitchGuard();
           setIsPlaying(false);
+          void backgroundAudioBridge.stop();
           setPlaybackError(online ? "This audio could not be loaded." : "This track is not downloaded for offline playback.");
         }}
         onEnded={handleEnded}
