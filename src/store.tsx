@@ -118,9 +118,9 @@ type StoredTrack = Partial<Track> & { src?: string; provider?: string; id: strin
  */
 function migrateTrack(stored: StoredTrack): Track | null {
   if (!stored || typeof stored.id !== "string" || typeof stored.title !== "string") return null;
-  const legacyProvider = stored.provider === "Audius" ? "audius" : stored.provider === "Jamendo" ? "jamendo" : stored.provider === "Local" ? "local" : "sample";
+  const legacyProvider = stored.provider === "Audius" ? "audius" : stored.provider === "Jamendo" ? "jamendo" : stored.provider === "Internet Archive" ? "internetarchive" : stored.provider === "Local" ? "local" : "sample";
   const providerId: ProviderId = stored.providerId ?? legacyProvider;
-  const providerTrackId = stored.providerTrackId ?? stored.id.replace(/^(audius|jamendo|sample|local)-/, "");
+  const providerTrackId = stored.providerTrackId ?? stored.id.replace(/^(audius|jamendo|internetarchive|sample|local)-/, "");
   const streamUrl = stored.streamUrl ?? stored.src ?? "";
   const id = stored.id.startsWith(`${providerId}-`) || providerId === "local" ? stored.id : `${providerId}-${stored.id}`;
   const rawArtwork = stored.artwork ?? "";
@@ -150,7 +150,7 @@ function migrateTrack(stored: StoredTrack): Track | null {
     genre: stored.genre ?? "Other",
     tags: Array.isArray(stored.tags) ? stored.tags : [],
     licensing: stored.licensing ?? {
-      name: providerId === "audius" ? "Audius track licence" : providerId === "jamendo" ? "Creative Commons" : "Local file",
+      name: providerId === "audius" ? "Audius track licence" : providerId === "jamendo" ? "Creative Commons" : providerId === "internetarchive" ? "Internet Archive item" : "Local file",
       streamingAllowed: true,
       downloadAllowed: Boolean(stored.downloadUrl),
     },
@@ -235,6 +235,14 @@ type Store = {
       thumbnail?: string;
       sourceUrl?: string;
       extractor?: string;
+      genre?: string;
+      releaseDate?: string;
+      licensing?: {
+        name?: string;
+        url?: string;
+        attribution?: string;
+        note?: string;
+      };
     };
     targetFolderId?: string | null;
   }) => Promise<Track>;
@@ -853,6 +861,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       thumbnail?: string;
       sourceUrl?: string;
       extractor?: string;
+      genre?: string;
+      releaseDate?: string;
+      licensing?: {
+        name?: string;
+        url?: string;
+        attribution?: string;
+        note?: string;
+      };
     };
     targetFolderId?: string | null;
   }): Promise<Track> => {
@@ -898,6 +914,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       : undefined;
 
     const id = `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const customLic = params.metadata.licensing;
     const track: Track = {
       id,
       providerId: "local",
@@ -911,16 +928,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       ...(artworkMeta ? { artworkMeta } : {}),
       duration: Math.max(0, params.metadata.duration ?? 0),
       streamUrl: URL.createObjectURL(file),
-      genre: "Imported",
+      genre: params.metadata.genre || "Imported",
       tags: params.metadata.extractor ? [params.metadata.extractor.toLowerCase()] : [],
       licensing: {
-        name: "Authorized user media import",
-        ...(params.metadata.sourceUrl ? { url: params.metadata.sourceUrl } : {}),
-        attribution: "Imported via yt-dlp with user rights confirmation",
+        name: customLic?.name || "Authorized user media import",
+        ...(customLic?.url || params.metadata.sourceUrl ? { url: customLic?.url || params.metadata.sourceUrl } : {}),
+        attribution: customLic?.attribution || "Imported via yt-dlp with user rights confirmation",
         streamingAllowed: true,
         downloadAllowed: true,
-        note: "Authorized import — stored offline in this browser.",
+        note: customLic?.note || "Authorized import — stored offline in this browser.",
       },
+      ...(params.metadata.releaseDate ? { releaseDate: params.metadata.releaseDate } : {}),
       ...(params.metadata.sourceUrl ? { permalink: params.metadata.sourceUrl } : {}),
       accent: PROVIDER_ACCENTS.local,
       imported: true,

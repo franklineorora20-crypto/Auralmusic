@@ -42,6 +42,18 @@ The app stores playlists, favourites, recently played tracks, preferences and ca
 
 This repository has no authentication or cloud backend. Library data is local to the browser profile and is not synchronized across devices. Audius playback and download availability are controlled by Audius and each uploader; a stream URL alone is never treated as download permission.
 
+## Internet Archive music provider
+
+Aural integrates [Internet Archive](https://archive.org/) in **Search -> Source -> Internet Archive** (and **All sources**) using the official public Advanced Search API (`https://archive.org/advancedsearch.php`) and Metadata API (`https://archive.org/metadata/<identifier>`). No API key is required.
+
+- **Playback & metadata**: Searches filter to `mediatype:audio` with pagination and hydrate track titles, creators, durations, release dates, cover images, and direct links to the original `archive.org/details/<identifier>` item page.
+- **Playlists, favourites & local library**: Eligible playable recordings can be played through Aural's audio engine, added to favourites or playlists, and imported into the browser's IndexedDB local library from the item details dialog.
+- **Rights & limitations**:
+  - Items marked `access-restricted-item`, `stream_only`, lending/inlibrary collections, or private files are surfaced as unavailable and cannot be played or downloaded.
+  - Explicit Creative Commons / Public Domain Mark / CC0 / NoC licenses allow direct offline downloads. Unspecified-license items never assume public domain and require explicit user confirmation before local import, while explicit copyright/all-rights-reserved items block downloading and importing.
+  - Legacy or non-browser audio formats (such as `.shn`, `.ape`, `.wma`) are skipped unless a compatible derivative (`MP3`, `OGG`, `M4A`, `Opus`, `FLAC`, `WAV`) is available.
+  - Streaming and importing rely on Archive.org availability and CORS headers; single-track offline imports remain capped at 80 MB.
+
 ## Optional yt-dlp media-import provider
 
 Aural includes an optional `yt-dlp` source in **Search -> Source -> yt-dlp** (and **Import URL** in Library/Downloads) backed by a local Express service (`server.ts` + `server/ytdlpService.ts`). The React renderer never executes shell commands or spawns processes directly.

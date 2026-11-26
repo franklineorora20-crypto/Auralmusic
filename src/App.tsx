@@ -3,11 +3,12 @@ import CRTWarp from "./components/CRTWarp";
 import Ferrofluid from "./components/Ferrofluid";
 import { getCrtPreset } from "./components/crtPresets";
 import {
-  ArrowLeft, ArrowLeftRight, ArrowRight, ChevronDown, ChevronUp, Download, HardDrive,
+  Archive, ArrowLeft, ArrowLeftRight, ArrowRight, ChevronDown, ChevronUp, Download, HardDrive,
   Heart, Home, ImagePlus, Infinity as InfinityIcon, Library, Link2, ListMusic, MicVocal, Pause, Play, Plus,
   Repeat1, Repeat2, Search, Shuffle, SkipBack, SkipForward, Trash2, Upload, Volume2,
   UserRound, VolumeX, Wifi, WifiOff, X, PanelLeftClose, PanelLeftOpen, ChevronsUp, Clock, Radio,
 } from "lucide-react";
+import ArchiveItemModal from "./components/ArchiveItemModal";
 import CoverArtModal from "./components/CoverArtModal";
 import LibraryFileSystem from "./components/LibraryFileSystem";
 import LyricsPanel from "./components/LyricsPanel";
@@ -45,7 +46,7 @@ import { useOnlineStatus, usePWAInstall } from "./pwa/usePWAInstall";
 import { StoreProvider, useStore } from "./store";
 import { demoTracks } from "./data";
 import type { Track, View } from "./types";
-import { getTrending, searchMusic } from "./catalog";
+import { getTrending, searchCataloguePage } from "./catalog";
 
 
 const formatTime = (seconds: number) => {
@@ -60,11 +61,13 @@ function AuralApp() {
   const [selectedId, setSelectedId] = useState("");
   const [query, setQuery] = useState("");
   const [searchFilter, setSearchFilter] = useState("All");
-  const [searchProvider, setSearchProvider] = useState<"all" | "audius" | "jamendo" | "local" | "ytdlp">("all");
+  const [searchProvider, setSearchProvider] = useState<"all" | "audius" | "jamendo" | "internetarchive" | "local" | "ytdlp">("all");
   const [searchTracks, setSearchTracks] = useState<Track[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState("");
-  const [searchOffset, setSearchOffset] = useState(0);
+  const [searchWarnings, setSearchWarnings] = useState<string[]>([]);
+  const [searchNextOffset, setSearchNextOffset] = useState(0);
+  const [searchTotal, setSearchTotal] = useState<number | undefined>(undefined);
   const [searchHasMore, setSearchHasMore] = useState(false);
   const [catalogueLoading, setCatalogueLoading] = useState(false);
   const [catalogueError, setCatalogueError] = useState("");
@@ -84,6 +87,7 @@ function AuralApp() {
   const [createOpen, setCreateOpen] = useState(false);
   const [addTrackId, setAddTrackId] = useState("");
   const [coverEditTrackId, setCoverEditTrackId] = useState("");
+  const [archiveDetailTrack, setArchiveDetailTrack] = useState<Track | null>(null);
   const [playlistName, setPlaylistName] = useState("");
   const [importMessage, setImportMessage] = useState("");
   const [history, setHistory] = useState<Array<{ view: View; selectedId: string }>>([{ view: "home", selectedId: "" }]);
@@ -428,22 +432,35 @@ function AuralApp() {
     if (view !== "search" || !term || searchProvider === "ytdlp" || searchProvider === "local") {
       setSearchTracks([]);
       setSearchError("");
+      setSearchWarnings([]);
+      setSearchTotal(undefined);
+      setSearchNextOffset(0);
+      setSearchHasMore(false);
       setSearchLoading(false);
       return;
     }
     setSearchTracks([]);
     setSearchHasMore(false);
+    setSearchTotal(undefined);
+    setSearchWarnings([]);
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       setSearchLoading(true);
       setSearchError("");
-      setSearchOffset(0);
-            searchMusic(term, controller.signal)
-
-        .then((tracks) => {
-          setSearchTracks(tracks);
-          setSearchHasMore(tracks.length === 20);
-          store.addCatalogueTracks(tracks);
+      setSearchNextOffset(0);
+      searchCataloguePage({
+        query: term,
+        provider: searchProvider,
+        signal: controller.signal,
+        offset: 0,
+      })
+        .then((page) => {
+          setSearchTracks(page.tracks);
+          setSearchHasMore(page.hasMore);
+          setSearchNextOffset(page.nextOffset);
+          setSearchTotal(page.total);
+          setSearchWarnings(page.warnings);
+          store.addCatalogueTracks(page.tracks);
           setSearchHistory((previous) => {
             const updated = [term, ...previous.filter((item) => item.toLowerCase() !== term.toLowerCase())].slice(0, 8);
             localStorage.setItem("aural-search-history", JSON.stringify(updated));
@@ -452,7 +469,7 @@ function AuralApp() {
         })
         .catch((error: unknown) => {
           if (!(error instanceof DOMException && error.name === "AbortError")) {
-            setSearchError(error instanceof Error ? error.message : "Could not search the Audius catalogue.");
+            setSearchError(error instanceof Error ? error.message : "Could not search the music catalogue.");
           }
         })
         .finally(() => {
@@ -469,19 +486,27 @@ function AuralApp() {
 
   const loadMoreSearchResults = () => {
     const term = query.trim();
-    if (!term || searchLoading) return;
-    const nextOffset = searchOffset + 20;
+    if (!term || searchLoading || searchProvider === "local" || searchProvider === "ytdlp") return;
     loadMoreController.current?.abort();
     const controller = new AbortController();
     loadMoreController.current = controller;
     setSearchLoading(true);
-        searchMusic(term, controller.signal, nextOffset)
-
-      .then((tracks) => {
-        setSearchTracks((previous) => [...previous, ...tracks]);
-        setSearchOffset(nextOffset);
-        setSearchHasMore(tracks.length === 20);
-        store.addCatalogueTracks(tracks);
+    searchCataloguePage({
+      query: term,
+      provider: searchProvider,
+      signal: controller.signal,
+      offset: searchNextOffset,
+    })
+      .then((page) => {
+        setSearchTracks((previous) => {
+          const seen = new Set(previous.map((t) => t.id));
+          return [...previous, ...page.tracks.filter((t) => !seen.has(t.id))];
+        });
+        setSearchNextOffset(page.nextOffset);
+        setSearchHasMore(page.hasMore);
+        if (page.total !== undefined) setSearchTotal(page.total);
+        if (page.warnings.length) setSearchWarnings(page.warnings);
+        store.addCatalogueTracks(page.tracks);
       })
       .catch((error: unknown) => {
         if (!(error instanceof DOMException && error.name === "AbortError")) {
@@ -557,8 +582,13 @@ function AuralApp() {
   };
 
   const playTrack = (track: Track, collection?: Track[]) => {
+    if (!track.streamUrl || track.licensing.streamingAllowed === false) {
+      setPlaybackError(track.licensing.note || `"${track.title}" is unavailable for playback.`);
+      return;
+    }
     if (collection?.length) {
-      const collectionIds = collection.map((item) => item.id);
+      const playableCollection = collection.filter((item) => Boolean(item.streamUrl) && item.licensing.streamingAllowed !== false);
+      const collectionIds = (playableCollection.length ? playableCollection : [track]).map((item) => item.id);
       store.setQueue(collectionIds);
       if (store.shuffle) {
         const activeSet = new Set(collectionIds);
@@ -1026,6 +1056,7 @@ function AuralApp() {
         shortcutRef.current.closeQueuePanel();
         shortcutRef.current.closeCreateModal();
         shortcutRef.current.closeAddModal();
+        setArchiveDetailTrack(null);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -1065,8 +1096,19 @@ function AuralApp() {
   const renderTrackRow = ({ track, index, playlistId, collection }: { track: Track; index?: number; playlistId?: string; collection?: Track[] }) => {
     const isCurrentTrack = track.id === currentId;
     const isTrackPlaying = isCurrentTrack && isPlaying;
+    const isUnavailable = !track.streamUrl || track.licensing.streamingAllowed === false;
+    const providerTag =
+      track.providerId === "sample"
+        ? " · Sample preview"
+        : track.providerId === "audius"
+          ? " · Audius"
+          : track.providerId === "jamendo"
+            ? " · Jamendo"
+            : track.providerId === "internetarchive"
+              ? " · Internet Archive"
+              : "";
     return (
-      <div key={track.id} className={`track-row ${isCurrentTrack ? "is-current" : ""}`}>
+      <div key={track.id} className={`track-row ${playlistId ? "in-playlist" : ""} ${isCurrentTrack ? "is-current" : ""} ${isUnavailable ? "is-unavailable" : ""}`}>
         {typeof index === "number" ? (
           isTrackPlaying ? (
             <span className="row-equalizer" aria-label="Playing"><span /><span /><span /></span>
@@ -1074,22 +1116,44 @@ function AuralApp() {
             <span className="track-index">{index + 1}</span>
           )
         ) : (
-          <button className="icon-button" onClick={() => playTrack(track, collection)} aria-label={isTrackPlaying ? `Pause ${track.title}` : `Play ${track.title}`}>
+          <button
+            className="icon-button"
+            disabled={isUnavailable}
+            onClick={() => playTrack(track, collection)}
+            aria-label={isUnavailable ? `${track.title} unavailable` : isTrackPlaying ? `Pause ${track.title}` : `Play ${track.title}`}
+            title={isUnavailable ? track.licensing.note : undefined}
+          >
             {isTrackPlaying ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}
           </button>
         )}
-        <button className="track-main" onClick={() => playTrack(track, collection)}>
+        <button
+          className="track-main"
+          onClick={() => {
+            if (isUnavailable && track.providerId === "internetarchive") {
+              setArchiveDetailTrack(track);
+            } else {
+              playTrack(track, collection);
+            }
+          }}
+          title={isUnavailable ? track.licensing.note : undefined}
+        >
           <TrackArtwork track={track} size="small" />
           <span>
             <strong>{track.title}</strong>
-            <small>{track.artist}{track.providerId === "sample" ? " · Sample preview" : track.providerId === "audius" ? " · Audius" : track.providerId === "jamendo" ? " · Jamendo" : ""}</small>
+            <small>
+              {track.artist}
+              {providerTag}
+              {isUnavailable ? " · Unavailable" : ""}
+            </small>
           </span>
         </button>
         <button className="track-album" onClick={() => navigate("album", track.album)}>{track.album}</button>
         <button
           className={`icon-button favourite ${store.favouriteIds.includes(track.id) ? "active" : ""}`}
+          disabled={isUnavailable}
           onClick={() => store.toggleFavourite(track.id)}
           aria-label={store.favouriteIds.includes(track.id) ? "Remove from favourites" : "Add to favourites"}
+          title={isUnavailable ? "Unavailable recordings cannot be added to favourites" : undefined}
         ><Heart size={16} fill={store.favouriteIds.includes(track.id) ? "currentColor" : "none"} /></button>
         {playlistId && <div className="track-reorder">
           <button className="icon-button" onClick={() => store.reorderPlaylistTrack(playlistId, track.id, -1)} aria-label="Move track up"><ChevronUp size={15} /></button>
@@ -1098,8 +1162,24 @@ function AuralApp() {
         <span className="track-duration">{formatTime(track.duration)}</span>
         {playlistId
           ? <button className="icon-button" onClick={() => store.removeFromPlaylist(playlistId, track.id)} aria-label={`Remove ${track.title}`}><Trash2 size={15} /></button>
-          : <button className="icon-button" onClick={() => setAddTrackId(track.id)} aria-label={`Add ${track.title} to a playlist`}><Plus size={15} /></button>}
+          : <button
+              className="icon-button"
+              disabled={isUnavailable}
+              onClick={() => setAddTrackId(track.id)}
+              aria-label={`Add ${track.title} to a playlist`}
+              title={isUnavailable ? "Unavailable recordings cannot be added to playlists" : undefined}
+            ><Plus size={15} /></button>}
         <div className="track-row-end-actions">
+          {track.providerId === "internetarchive" && (
+            <button
+              className="icon-button"
+              onClick={() => setArchiveDetailTrack(track)}
+              aria-label={`Inspect ${track.title} on Internet Archive`}
+              title="View Archive.org files, licence & import"
+            >
+              <Archive size={15} />
+            </button>
+          )}
           <button
             className={`icon-button ${isDisplayableImageUrl(track.artwork) ? "active" : ""}`}
             onClick={() => setCoverEditTrackId(track.id)}
@@ -1269,6 +1349,7 @@ function AuralApp() {
               { id: "all", label: "All sources" },
               { id: "audius", label: "Audius" },
               { id: "jamendo", label: "Jamendo" },
+              { id: "internetarchive", label: "Internet Archive" },
               { id: "local", label: "Local library" },
               { id: "ytdlp", label: "yt-dlp" },
             ] as const
@@ -1302,9 +1383,37 @@ function AuralApp() {
             <section className="search-results">
               {searchProvider !== "local" && (
                 <>
-                  <div className="section-heading"><h2>{searchFilter === "Playlists" ? "Your playlists" : "Catalogue results"}</h2><small>{searchFilter === "Playlists" ? store.playlists.filter((playlist) => playlist.name.toLowerCase().includes(query.toLowerCase())).length : searchTracks.filter((t) => searchProvider === "all" || t.providerId === searchProvider).length} results</small></div>
-                  {searchLoading && <p className="catalogue-status" role="status">Searching Audius and Jamendo…</p>}
+                  <div className="section-heading">
+                    <h2>
+                      {searchFilter === "Playlists"
+                        ? "Your playlists"
+                        : searchProvider === "internetarchive"
+                          ? "Internet Archive results"
+                          : "Catalogue results"}
+                    </h2>
+                    <small>
+                      {searchFilter === "Playlists"
+                        ? `${store.playlists.filter((playlist) => playlist.name.toLowerCase().includes(query.toLowerCase())).length} results`
+                        : searchProvider === "internetarchive" && typeof searchTotal === "number"
+                          ? `${searchTracks.filter((t) => t.providerId === "internetarchive").length} of ${searchTotal.toLocaleString()} items`
+                          : `${searchTracks.filter((t) => searchProvider === "all" || t.providerId === searchProvider).length} results`}
+                    </small>
+                  </div>
+                  {searchLoading && (
+                    <p className="catalogue-status" role="status">
+                      {searchProvider === "internetarchive"
+                        ? "Searching Internet Archive…"
+                        : searchProvider === "audius"
+                          ? "Searching Audius…"
+                          : searchProvider === "jamendo"
+                            ? "Searching Jamendo…"
+                            : "Searching Audius, Jamendo, and Internet Archive…"}
+                    </p>
+                  )}
                   {searchError && <p className="catalogue-error" role="alert">{searchError}</p>}
+                  {!searchError && searchWarnings.length > 0 && (
+                    <p className="search-warning-note" role="status">{searchWarnings.join(" · ")}</p>
+                  )}
                   {searchFilter === "Playlists"
                     ? store.playlists.filter((playlist) => playlist.name.toLowerCase().includes(query.toLowerCase())).map((playlist) => (
                       <button className="search-playlist-result" key={playlist.id} onClick={() => navigate("playlist", playlist.id)}><ListMusic size={19} /><strong>{playlist.name}</strong><small>{playlist.trackIds.length} tracks · Your playlist</small></button>
@@ -1341,17 +1450,33 @@ function AuralApp() {
             </section>
           ) : (
             <section className="content-section">
-              <div className="section-heading"><h2>Browse categories</h2></div>
+              <div className="section-heading">
+                <h2>{searchProvider === "internetarchive" ? "Explore Internet Archive audio" : "Browse categories"}</h2>
+              </div>
               {searchHistory.length > 0 && <div className="search-history"><span>Recent searches</span>{searchHistory.map((term) => <button key={term} onClick={() => setQuery(term)}>{term}</button>)}</div>}
               <div className="category-grid">
-                {["Electronic", "Ambient", "Indie", "Soul", "Pop", "Alternative"].map((category, index) => (
+                {(searchProvider === "internetarchive"
+                  ? [
+                      { label: "78 rpm jazz", hint: "Archive recordings", filter: "All" },
+                      { label: "Ambient netlabel", hint: "Creative Commons", filter: "All" },
+                      { label: "Live concert", hint: "Live Music Archive", filter: "All" },
+                      { label: "Classical piano", hint: "Public archive", filter: "All" },
+                      { label: "Field recordings", hint: "Soundscapes", filter: "All" },
+                      { label: "Folk blues", hint: "Historic audio", filter: "All" },
+                    ]
+                  : ["Electronic", "Ambient", "Indie", "Soul", "Pop", "Alternative"].map((category) => ({
+                      label: category,
+                      hint: "Explore genre",
+                      filter: category === "Focus" || category === "Chill" ? "All" : "Genres",
+                    }))
+                ).map((item, index) => (
                   <button
-                    key={category}
+                    key={item.label}
                     style={{ "--cat-color": ["#8a633b", "#2d5241", "#8b4e3c", "#7a313c", "#2f4562", "#5c6142"][index] } as React.CSSProperties}
-                    onClick={() => { setQuery(category); setSearchFilter(category === "Focus" || category === "Chill" ? "All" : "Genres"); }}
+                    onClick={() => { setQuery(item.label); setSearchFilter(item.filter); }}
                   >
-                    <strong>{category}</strong>
-                    <span>Explore genre</span>
+                    <strong>{item.label}</strong>
+                    <span>{item.hint}</span>
                   </button>
                 ))}
               </div>
@@ -1983,6 +2108,16 @@ function AuralApp() {
           onAutoFindArtwork={async (trackId) => {
             await store.requestTrackArtwork(trackId, { forceRefresh: true });
           }}
+        />
+      )}
+
+      {archiveDetailTrack && (
+        <ArchiveItemModal
+          track={archiveDetailTrack}
+          onClose={() => setArchiveDetailTrack(null)}
+          onPlayTrack={(nextTrack, collection) => playTrack(nextTrack, collection)}
+          onAddTrackToPlaylist={(trackId) => setAddTrackId(trackId)}
+          onOpenLibrary={() => navigate("library")}
         />
       )}
 

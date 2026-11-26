@@ -87,6 +87,13 @@ export function getProviderStatuses(): ProviderStatus[] {
       docsUrl: PROVIDER_DOCS.jamendo,
     },
     {
+      id: "internetarchive",
+      name: PROVIDER_NAMES.internetarchive,
+      ready: true,
+      requiresKey: false,
+      docsUrl: PROVIDER_DOCS.internetarchive,
+    },
+    {
       id: "local",
       name: PROVIDER_NAMES.local,
       ready: true,

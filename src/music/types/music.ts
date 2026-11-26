@@ -6,7 +6,7 @@
  * provider-specific response again.
  */
 
-export type ProviderId = "audius" | "jamendo" | "local" | "sample" | "ytdlp";
+export type ProviderId = "audius" | "jamendo" | "internetarchive" | "local" | "sample" | "ytdlp";
 
 export type TrackLicensing = {
   /** Human readable licence name, e.g. "Creative Commons BY-NC-SA 3.0". */
@@ -28,6 +28,7 @@ export type ArtworkSource =
   | "embedded"
   | "audius"
   | "jamendo"
+  | "internetarchive"
   | "coverartarchive"
   | "itunes"
   | "deezer"
@@ -190,6 +191,7 @@ export const GENRE_CATEGORIES: GenreCategory[] = [
 export const PROVIDER_NAMES: Record<ProviderId, string> = {
   audius: "Audius",
   jamendo: "Jamendo",
+  internetarchive: "Internet Archive",
   local: "Local library",
   sample: "Sample preview",
   ytdlp: "yt-dlp (Authorized)",
@@ -198,6 +200,7 @@ export const PROVIDER_NAMES: Record<ProviderId, string> = {
 export const PROVIDER_ACCENTS: Record<ProviderId, string> = {
   audius: "#5b7c65",
   jamendo: "#4d6480",
+  internetarchive: "#7b6246",
   local: "#c49e64",
   sample: "#8b6f4e",
   ytdlp: "#a46f43",
@@ -206,6 +209,7 @@ export const PROVIDER_ACCENTS: Record<ProviderId, string> = {
 export const PROVIDER_DOCS: Record<ProviderId, string> = {
   audius: "https://docs.audius.co/",
   jamendo: "https://developer.jamendo.com/",
+  internetarchive: "https://archive.org/services/docs/api/",
   local: "",
   sample: "",
   ytdlp: "https://github.com/yt-dlp/yt-dlp",

@@ -935,13 +935,16 @@ button { border: 0; cursor: pointer; color: inherit; background: transparent; }
 .track-row {
   min-height: 58px;
   display: grid;
-  grid-template-columns: 28px minmax(220px, 1.5fr) minmax(160px, 1fr) 36px auto 52px 36px auto;
+  grid-template-columns: 28px minmax(220px, 1.5fr) minmax(160px, 1fr) 36px 52px 36px auto;
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
   border-radius: var(--r-xs);
   border-bottom: 1px solid var(--line);
   transition: background var(--t-fast);
+}
+.track-row.in-playlist {
+  grid-template-columns: 28px minmax(220px, 1.5fr) minmax(160px, 1fr) 36px auto 52px 36px auto;
 }
 .track-row-end-actions {
   display: flex;
@@ -2737,7 +2740,8 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 0; bo
 @media (max-width: 1180px) {
   .card-grid, .skeleton-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .playlist-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .track-row { grid-template-columns: 28px minmax(180px, 1.5fr) 36px auto 50px 36px auto; }
+  .track-row { grid-template-columns: 28px minmax(180px, 1.5fr) 36px 50px 36px auto; }
+  .track-row.in-playlist { grid-template-columns: 28px minmax(180px, 1.5fr) 36px auto 50px 36px auto; }
   .track-album { display: none; }
   .page { padding: 20px 24px 48px; }
   .topbar { padding: env(safe-area-inset-top, 0px) max(24px, env(safe-area-inset-right, 0px)) 0 max(24px, env(safe-area-inset-left, 0px)); }
@@ -3504,3 +3508,203 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 0; bo
   flex-wrap: wrap;
 }
 
+/* ---------- Internet Archive Integration ---------- */
+
+.track-row.is-unavailable {
+  opacity: 0.58;
+}
+.track-row.is-unavailable .icon-button:disabled {
+  opacity: 0.36;
+  cursor: not-allowed;
+}
+.search-warning-note {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  color: var(--gold-tint);
+}
+
+.archive-modal {
+  width: min(640px, calc(100vw - 28px));
+  gap: 16px;
+}
+.archive-modal-head {
+  display: grid;
+  gap: 4px;
+  padding-right: 28px;
+}
+.archive-modal-head h2 {
+  font-size: 20px;
+  line-height: 1.25;
+}
+.archive-modal-sub {
+  font-size: 13.5px;
+  color: var(--text-2);
+}
+.archive-external-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--gold-tint);
+  text-decoration: none;
+}
+.archive-external-link:hover {
+  text-decoration: underline;
+}
+.archive-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+  font-size: 13.5px;
+}
+.archive-description {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.archive-rights-box {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+}
+.archive-rights-box.is-open {
+  border-color: rgba(120, 163, 124, 0.36);
+  background: rgba(120, 163, 124, 0.08);
+}
+.archive-rights-box.is-caution {
+  border-color: rgba(223, 192, 138, 0.34);
+  background: rgba(223, 192, 138, 0.07);
+}
+.archive-rights-box.is-restricted {
+  border-color: rgba(216, 138, 132, 0.36);
+  background: rgba(216, 138, 132, 0.1);
+}
+.archive-rights-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  color: var(--text);
+}
+.archive-rights-box p {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+.archive-rights-box a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  font-size: 12.5px;
+  color: var(--gold-tint);
+  text-decoration: none;
+}
+.archive-rights-confirm {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.archive-import-success {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid rgba(120, 163, 124, 0.36);
+  background: rgba(120, 163, 124, 0.1);
+  color: #a9d1ad;
+  font-size: 13px;
+}
+.archive-import-success span {
+  flex: 1 1 180px;
+  color: var(--text);
+}
+
+.archive-files-section {
+  display: grid;
+  gap: 10px;
+}
+.archive-files-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.archive-files-header strong {
+  font-size: 14px;
+}
+.archive-files-header small {
+  font-size: 12px;
+  color: var(--text-3);
+}
+.archive-files-list {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.archive-file-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+.archive-file-play {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--raised);
+  color: var(--text);
+}
+.archive-file-play:hover {
+  background: var(--gold);
+  color: #14110c;
+}
+.archive-file-meta {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.archive-file-meta strong {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.archive-file-meta small {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.archive-file-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.archive-import-btn {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+  gap: 5px;
+}
+.archive-unavailable-note {
+  font-size: 13px;
+  color: var(--text-2);
+}

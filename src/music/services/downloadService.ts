@@ -19,7 +19,7 @@ export function canDownload(track: Track): boolean {
     track.downloadUrl &&
       track.licensing.downloadAllowed &&
       track.providerId !== "sample" &&
-      track.streamUrl !== track.downloadUrl,
+      (track.providerId === "internetarchive" || track.streamUrl !== track.downloadUrl),
   );
 }
 
@@ -73,7 +73,10 @@ export async function fetchTrackAudio(track: Track, options: DownloadOptions = {
   }
 
   const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
-  const isAudio = contentType.startsWith("audio/") || contentType.includes("octet-stream");
+  const isAudio =
+    contentType.startsWith("audio/") ||
+    contentType.startsWith("application/ogg") ||
+    contentType.includes("octet-stream");
   if (contentType && !isAudio) {
     throw new Error(`${track.providerName} did not return an audio file.`);
   }

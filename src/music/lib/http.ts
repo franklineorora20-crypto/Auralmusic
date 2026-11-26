@@ -66,6 +66,7 @@ class ProviderRateLimiter {
 const limiters: Record<ProviderId, ProviderRateLimiter> = {
   audius: new ProviderRateLimiter(3),
   jamendo: new ProviderRateLimiter(3),
+  internetarchive: new ProviderRateLimiter(4),
   local: new ProviderRateLimiter(50),
   sample: new ProviderRateLimiter(50),
   ytdlp: new ProviderRateLimiter(10),
@@ -85,12 +86,12 @@ export class ProviderError extends Error {
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       signal?.removeEventListener("abort", onAbort);
       resolve();
     }, ms);
     const onAbort = () => {
-      window.clearTimeout(timer);
+      globalThis.clearTimeout(timer);
       reject(new DOMException("Aborted", "AbortError"));
     };
     if (signal?.aborted) {
@@ -135,7 +136,7 @@ async function performRequest<T>({ provider, url }: JsonRequest): Promise<T> {
   await limiter.acquire();
 
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = globalThis.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const response = await fetch(url, {
       signal: controller.signal,
@@ -172,7 +173,7 @@ async function performRequest<T>({ provider, url }: JsonRequest): Promise<T> {
     if (error instanceof ProviderError) throw error;
     throw new ProviderError(provider, `${provider} could not be reached. Check your connection.`);
   } finally {
-    window.clearTimeout(timeout);
+    globalThis.clearTimeout(timeout);
   }
 }
 
@@ -280,7 +281,8 @@ export function readRecord(source: unknown, key: string): JsonRecord | undefined
 export function safeUrl(value: string): string {
   if (!value) return "";
   try {
-    const url = new URL(value, window.location.href);
+    const base = typeof window !== "undefined" ? window.location.href : "https://archive.org/";
+    const url = new URL(value, base);
     if (url.protocol === "https:" || url.protocol === "http:") return url.toString();
     if (url.protocol === "blob:") return url.toString();
     return "";

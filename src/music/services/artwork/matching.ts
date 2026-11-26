@@ -375,6 +375,7 @@ const SOURCE_PRIORITY: Record<ArtworkSource, number> = {
   deezer: 620,
   audius: 500,
   jamendo: 500,
+  internetarchive: 500,
   none: 0,
 };
 
