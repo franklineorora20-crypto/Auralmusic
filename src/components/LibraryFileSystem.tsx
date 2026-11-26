@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, type DragEvent } from "react";
 import {
   ArrowUpDown,
+  CheckSquare,
   ChevronRight,
   CornerLeftUp,
   Download,
@@ -20,10 +21,13 @@ import {
   Plus,
   Search,
   Shuffle,
+  Square,
+  Tags,
   Trash2,
   Upload,
   X,
 } from "lucide-react";
+import { findDuplicateTracks } from "../music/lib/libraryManagement";
 import { isDisplayableImageUrl } from "../music/lib/mediaMetadata";
 import { formatBytes } from "../offline";
 import { useStore, type LibraryFolder } from "../store";
@@ -141,6 +145,18 @@ export default function LibraryFileSystem({
   const [moveTrackTarget, setMoveTrackTarget] = useState<{ trackId: string; fromFolderId: string | null } | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [folderEnterKey, setFolderEnterKey] = useState(0);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [showDuplicatesOnly, setShowDuplicatesOnly] = useState(false);
+  const [batchPlaylistOpen, setBatchPlaylistOpen] = useState(false);
+  const [batchFolderOpen, setBatchFolderOpen] = useState(false);
+  const [tagEditTarget, setTagEditTarget] = useState<{
+    id: string;
+    title: string;
+    artist: string;
+    album: string;
+    genre: string;
+  } | null>(null);
   const filterInputRef = useRef<HTMLInputElement>(null);
 
   const importedTracks = useMemo(
@@ -205,6 +221,9 @@ export default function LibraryFileSystem({
     }
     setLocation(next);
     setFilterTerm("");
+    setSelectMode(false);
+    setSelectedIds([]);
+    setShowDuplicatesOnly(false);
     setFolderEnterKey((n) => n + 1);
   };
 
@@ -464,6 +483,29 @@ export default function LibraryFileSystem({
     setSortKey(next);
   };
 
+  const duplicateGroups = useMemo(
+    () => findDuplicateTracks(directoryTracks),
+    [directoryTracks],
+  );
+
+  const duplicateTrackIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const group of duplicateGroups) {
+      for (const track of group.tracks) set.add(track.id);
+    }
+    return set;
+  }, [duplicateGroups]);
+
+  const displayedTracks = useMemo(
+    () => (showDuplicatesOnly ? directoryTracks.filter((track) => duplicateTrackIds.has(track.id)) : directoryTracks),
+    [directoryTracks, duplicateTrackIds, showDuplicatesOnly],
+  );
+
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const toggleSelected = (id: string) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
+  };
+
   const totalDirectoryBytes = useMemo(
     () =>
       directoryTracks.reduce(
@@ -588,8 +630,84 @@ export default function LibraryFileSystem({
             {totalDirectoryBytes > 0 ? ` · ${formatBytes(totalDirectoryBytes)}` : ""}
           </span>
         </span>
-        <span className="fs-status-hint">Drop audio files anywhere here to import</span>
+        <div className="fs-status-tools">
+          {!isRoot && duplicateGroups.length > 0 && (
+            <button
+              type="button"
+              className={`fs-inline-pill ${showDuplicatesOnly ? "active" : ""}`}
+              onClick={() => setShowDuplicatesOnly((value) => !value)}
+              title="Filter matching title + artist duplicates"
+            >
+              {duplicateGroups.length} duplicate group{duplicateGroups.length === 1 ? "" : "s"}
+            </button>
+          )}
+          {!isRoot && directoryTracks.length > 0 && (
+            <button
+              type="button"
+              className={`fs-inline-pill ${selectMode ? "active" : ""}`}
+              onClick={() => {
+                setSelectMode((value) => !value);
+                setSelectedIds([]);
+              }}
+            >
+              {selectMode ? "Done selecting" : "Select"}
+            </button>
+          )}
+          <span className="fs-status-hint">Drop audio files anywhere here to import</span>
+        </div>
       </div>
+
+      {selectMode && !isRoot && displayedTracks.length > 0 && (
+        <div className="fs-batch-bar" role="region" aria-label="Batch library actions">
+          <div className="fs-batch-left">
+            <button
+              type="button"
+              className="secondary-button fs-mini-btn"
+              onClick={() =>
+                setSelectedIds(
+                  selectedIds.length === displayedTracks.length ? [] : displayedTracks.map((t) => t.id),
+                )
+              }
+            >
+              {selectedIds.length === displayedTracks.length ? "Clear all" : `Select all (${displayedTracks.length})`}
+            </button>
+            <span className="fs-batch-count">{selectedIds.length} selected</span>
+          </div>
+          <div className="fs-batch-actions">
+            <button
+              type="button"
+              className="secondary-button fs-mini-btn"
+              disabled={!selectedIds.length}
+              onClick={() => setBatchPlaylistOpen(true)}
+            >
+              <Plus size={13} /> Add to playlist
+            </button>
+            <button
+              type="button"
+              className="secondary-button fs-mini-btn"
+              disabled={!selectedIds.length}
+              onClick={() => setBatchFolderOpen(true)}
+            >
+              <FolderInput size={13} /> Move to folder
+            </button>
+            {location.kind === "system" && (location.id === "sys:downloads" || location.id === "sys:imports") && (
+              <button
+                type="button"
+                className="secondary-button fs-mini-btn fs-danger-btn"
+                disabled={!selectedIds.length}
+                onClick={() => {
+                  const ids = [...selectedIds];
+                  setSelectedIds([]);
+                  setSelectMode(false);
+                  void store.removeLocalTracks(ids).catch(() => undefined);
+                }}
+              >
+                <Trash2 size={13} /> Delete offline
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="fs-stage paper-unfold" key={`${location.kind}-${"id" in location ? location.id : location.name}-${folderEnterKey}`}>
         {directoryFolders.length > 0 && (
@@ -793,7 +911,7 @@ export default function LibraryFileSystem({
               </div>
             )}
 
-            {directoryTracks.length > 0 ? (
+            {displayedTracks.length > 0 ? (
               <>
                 {viewMode === "list" && (
                   <div className="fs-table-head" aria-hidden="true">
@@ -806,24 +924,31 @@ export default function LibraryFileSystem({
                   </div>
                 )}
                 <div className={viewMode === "grid" ? "fs-file-grid" : "fs-file-list"}>
-                  {directoryTracks.map((track) => {
+                  {displayedTracks.map((track) => {
                     const active = track.id === currentId;
                     const playing = active && isPlaying;
                     const fileMeta = store.offlineMeta[track.id];
                     const ext = getFileExtension(track).toUpperCase();
                     const fileName = getTrackFileName(track);
                     const isStarred = store.favouriteIds.includes(track.id);
+                    const isChecked = selectedSet.has(track.id);
+                    const isLocalEditable = Boolean(track.imported || track.downloaded);
 
                     return (
                       <div
                         key={track.id}
-                        className={`fs-file-row ${viewMode === "grid" ? "is-grid" : ""} ${active ? "is-current" : ""}`}
+                        className={`fs-file-row ${viewMode === "grid" ? "is-grid" : ""} ${active ? "is-current" : ""} ${isChecked ? "is-selected" : ""}`}
                       >
                         <button
                           type="button"
                           className="fs-file-main"
-                          onClick={() => onPlayTrack(track, directoryTracks)}
+                          onClick={() => (selectMode ? toggleSelected(track.id) : onPlayTrack(track, displayedTracks))}
                         >
+                          {selectMode && (
+                            <span className="fs-select-check" aria-hidden="true">
+                              {isChecked ? <CheckSquare size={16} /> : <Square size={16} />}
+                            </span>
+                          )}
                           <span className="fs-file-icon" aria-hidden="true">
                             <TrackArtwork track={track} size="small" className="fs-file-thumb-art" />
                             {playing && (
@@ -858,6 +983,25 @@ export default function LibraryFileSystem({
                           >
                             <Heart size={14} fill={isStarred ? "currentColor" : "none"} />
                           </button>
+                          {isLocalEditable && (
+                            <button
+                              type="button"
+                              className="icon-button"
+                              onClick={() =>
+                                setTagEditTarget({
+                                  id: track.id,
+                                  title: track.title,
+                                  artist: track.artist,
+                                  album: track.album,
+                                  genre: track.genre,
+                                })
+                              }
+                              aria-label={`Edit tags for ${track.title}`}
+                              title="Edit title, artist, album & genre"
+                            >
+                              <Tags size={14} />
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="icon-button"
@@ -1040,6 +1184,149 @@ export default function LibraryFileSystem({
               }}
             >
               <FolderPlus size={15} /> Quick-create &ldquo;My Mixes&rdquo; &amp; file here
+            </button>
+          </div>
+        </div>
+      )}
+
+      {batchPlaylistOpen && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setBatchPlaylistOpen(false);
+          }}
+        >
+          <div className="modal paper-unfold" role="dialog" aria-modal="true" aria-labelledby="batch-pl-title">
+            <button type="button" className="modal-close" onClick={() => setBatchPlaylistOpen(false)} aria-label="Close">
+              <X size={18} />
+            </button>
+            <h2 id="batch-pl-title">Add {selectedIds.length} tracks to playlist</h2>
+            {store.playlists.map((playlist) => (
+              <button
+                key={playlist.id}
+                type="button"
+                className="secondary-button"
+                onClick={() => {
+                  store.addTracksToPlaylist(playlist.id, selectedIds);
+                  setBatchPlaylistOpen(false);
+                  setSelectMode(false);
+                  setSelectedIds([]);
+                }}
+              >
+                <ListMusic size={15} /> {playlist.name}
+              </button>
+            ))}
+            {store.playlists.length === 0 && (
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => {
+                  store.createPlaylist("Selected Mix", selectedIds);
+                  setBatchPlaylistOpen(false);
+                  setSelectMode(false);
+                  setSelectedIds([]);
+                }}
+              >
+                <Plus size={15} /> Create &ldquo;Selected Mix&rdquo;
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {batchFolderOpen && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setBatchFolderOpen(false);
+          }}
+        >
+          <div className="modal paper-unfold" role="dialog" aria-modal="true" aria-labelledby="batch-folder-title">
+            <button type="button" className="modal-close" onClick={() => setBatchFolderOpen(false)} aria-label="Close">
+              <X size={18} />
+            </button>
+            <h2 id="batch-folder-title">File {selectedIds.length} tracks into folder</h2>
+            {store.folders.map((folder) => (
+              <button
+                key={folder.id}
+                type="button"
+                className="secondary-button"
+                onClick={() => {
+                  for (const id of selectedIds) {
+                    if (location.kind === "custom") {
+                      store.moveTrackToFolder(location.id, folder.id, id);
+                    } else {
+                      store.addTrackToFolder(folder.id, id);
+                    }
+                  }
+                  setBatchFolderOpen(false);
+                  setSelectMode(false);
+                  setSelectedIds([]);
+                }}
+              >
+                <Folder size={15} /> {folder.name}
+              </button>
+            ))}
+            {store.folders.length === 0 && <p>Create a custom folder first to organize files.</p>}
+          </div>
+        </div>
+      )}
+
+      {tagEditTarget && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setTagEditTarget(null);
+          }}
+        >
+          <div className="modal paper-unfold" role="dialog" aria-modal="true" aria-labelledby="tag-edit-title">
+            <button type="button" className="modal-close" onClick={() => setTagEditTarget(null)} aria-label="Close">
+              <X size={18} />
+            </button>
+            <h2 id="tag-edit-title">Edit track metadata</h2>
+            <p>Changes persist locally in IndexedDB.</p>
+            <label className="tag-field">
+              <span>Title</span>
+              <input
+                autoFocus
+                value={tagEditTarget.title}
+                onChange={(e) => setTagEditTarget({ ...tagEditTarget, title: e.target.value })}
+              />
+            </label>
+            <label className="tag-field">
+              <span>Artist</span>
+              <input
+                value={tagEditTarget.artist}
+                onChange={(e) => setTagEditTarget({ ...tagEditTarget, artist: e.target.value })}
+              />
+            </label>
+            <label className="tag-field">
+              <span>Album</span>
+              <input
+                value={tagEditTarget.album}
+                onChange={(e) => setTagEditTarget({ ...tagEditTarget, album: e.target.value })}
+              />
+            </label>
+            <label className="tag-field">
+              <span>Genre</span>
+              <input
+                value={tagEditTarget.genre}
+                onChange={(e) => setTagEditTarget({ ...tagEditTarget, genre: e.target.value })}
+              />
+            </label>
+            <button
+              type="button"
+              className="primary-button"
+              disabled={!tagEditTarget.title.trim()}
+              onClick={() => {
+                void store.updateTrackMetadata(tagEditTarget.id, tagEditTarget);
+                setTagEditTarget(null);
+              }}
+            >
+              Save metadata
             </button>
           </div>
         </div>

@@ -9,6 +9,21 @@ export type LyricLine = {
   text: string;
 };
 
+export type LyricWord = {
+  /** Word start timestamp in seconds (>= 0). */
+  time: number;
+  /** Optional explicit end timestamp in seconds. */
+  endTime?: number;
+  text: string;
+};
+
+export type WordHighlightState = {
+  text: string;
+  /** Progress in [0, 1] for smooth karaoke fill / emphasis. */
+  progress: number;
+  state: "past" | "active" | "upcoming";
+};
+
 export type LyricsMetadata = {
   title?: string;
   artist?: string;
@@ -21,6 +36,8 @@ export type LyricsMetadata = {
 export type ParsedLyrics = {
   synced: boolean;
   lines: LyricLine[];
+  /** Optional parallel word-level timings matching `lines` when Enhanced LRC cues exist. */
+  wordTimings?: Array<LyricWord[] | undefined>;
   plainText: string;
   metadata: LyricsMetadata;
 };
@@ -34,6 +51,7 @@ export type EmbeddedAudioMetadata = {
 };
 
 const LRC_TIMESTAMP_RE = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+const ENHANCED_WORD_CUE_RE = /<(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?>/g;
 const LRC_TAG_RE = /^\[(ti|ar|al|by|length|offset):([^\]]*)\]$/i;
 
 function parseFractionToSeconds(fraction: string | undefined): number {
@@ -43,9 +61,82 @@ function parseFractionToSeconds(fraction: string | undefined): number {
   return Number(fraction.slice(0, 3)) / 1000;
 }
 
+function parseCueSeconds(minutesRaw: string, secondsRaw: string, fractionRaw?: string): number | null {
+  const minutes = Number(minutesRaw);
+  const seconds = Number(secondsRaw);
+  const fraction = parseFractionToSeconds(fractionRaw);
+  if (!Number.isFinite(minutes) || !Number.isFinite(seconds) || seconds >= 60) return null;
+  return minutes * 60 + seconds + fraction;
+}
+
 /**
- * Parses standard LRC text (including multi-timestamp lines and `[offset:]` tags)
- * or falls back to unsynced plain lyrics when no timestamps are present.
+ * Extracts Enhanced LRC inline word timings (`<mm:ss.xx>word`) from a lyric line
+ * body. Returns `undefined` when the line contains no valid inline word cues.
+ */
+export function parseEnhancedLrcWords(
+  rawBody: string,
+  lineStartTime: number,
+  offsetSeconds = 0,
+): LyricWord[] | undefined {
+  ENHANCED_WORD_CUE_RE.lastIndex = 0;
+  const cues: Array<{ index: number; endIndex: number; time: number }> = [];
+  let match: RegExpExecArray | null;
+  while ((match = ENHANCED_WORD_CUE_RE.exec(rawBody)) !== null) {
+    const parsedTime = parseCueSeconds(match[1], match[2], match[3]);
+    if (parsedTime !== null) {
+      cues.push({
+        index: match.index,
+        endIndex: match.index + match[0].length,
+        time: Math.max(0, Math.round((parsedTime - offsetSeconds) * 1000) / 1000),
+      });
+    }
+  }
+  if (!cues.length) return undefined;
+
+  const words: LyricWord[] = [];
+  const leading = rawBody.slice(0, cues[0].index).trim();
+  if (leading) {
+    for (const token of leading.split(/\s+/).filter(Boolean)) {
+      words.push({ time: Math.max(0, lineStartTime), text: token });
+    }
+  }
+
+  for (let i = 0; i < cues.length; i += 1) {
+    const currentCue = cues[i];
+    const nextCue = cues[i + 1];
+    const segment = rawBody.slice(currentCue.endIndex, nextCue ? nextCue.index : rawBody.length).trim();
+    if (!segment) {
+      // Trailing cue (e.g. `<00:12.50>` marking the end of the previous word)
+      if (words.length > 0 && !words[words.length - 1].endTime) {
+        words[words.length - 1].endTime = currentCue.time;
+      }
+      continue;
+    }
+    const tokens = segment.split(/\s+/).filter(Boolean);
+    const segmentEnd = nextCue?.time;
+    const step = segmentEnd !== undefined && tokens.length > 1
+      ? Math.max(0.05, (segmentEnd - currentCue.time) / tokens.length)
+      : 0;
+
+    tokens.forEach((token, idx) => {
+      const tokenStart = Math.round((currentCue.time + idx * step) * 1000) / 1000;
+      const tokenEnd = segmentEnd !== undefined
+        ? Math.round((idx === tokens.length - 1 ? segmentEnd : currentCue.time + (idx + 1) * step) * 1000) / 1000
+        : undefined;
+      words.push({
+        time: Math.max(0, tokenStart),
+        ...(tokenEnd !== undefined && tokenEnd > tokenStart ? { endTime: tokenEnd } : {}),
+        text: token,
+      });
+    });
+  }
+
+  return words.length > 0 ? words : undefined;
+}
+
+/**
+ * Parses standard LRC text (including multi-timestamp lines, `[offset:]` tags,
+ * and Enhanced LRC `<mm:ss.xx>` word cues) or falls back to unsynced plain lyrics.
  */
 export function parseLrc(raw: string): ParsedLyrics {
   const normalized = raw.replace(/\r\n?/g, "\n").trim();
@@ -54,7 +145,7 @@ export function parseLrc(raw: string): ParsedLyrics {
   }
 
   const metadata: LyricsMetadata = {};
-  const timedEntries: Array<{ rawTime: number; text: string }> = [];
+  const timedEntries: Array<{ rawTime: number; text: string; rawBody: string }> = [];
   const untimedLines: string[] = [];
 
   for (const rawLine of normalized.split("\n")) {
@@ -89,22 +180,21 @@ export function parseLrc(raw: string): ParsedLyrics {
     LRC_TIMESTAMP_RE.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = LRC_TIMESTAMP_RE.exec(trimmed)) !== null) {
-      const minutes = Number(match[1]);
-      const seconds = Number(match[2]);
-      const fraction = parseFractionToSeconds(match[3]);
-      if (Number.isFinite(minutes) && Number.isFinite(seconds) && seconds < 60) {
-        timestamps.push(minutes * 60 + seconds + fraction);
+      const parsed = parseCueSeconds(match[1], match[2], match[3]);
+      if (parsed !== null) {
+        timestamps.push(parsed);
       }
     }
 
     if (timestamps.length > 0) {
+      const rawBody = trimmed.replace(LRC_TIMESTAMP_RE, "").trim();
       // Strip inline enhanced-LRC word tags like <00:12.34> while keeping text intact.
-      const text = trimmed
-        .replace(LRC_TIMESTAMP_RE, "")
-        .replace(/<\d{1,3}:\d{2}(?:[.:]\d{1,3})?>/g, "")
+      const text = rawBody
+        .replace(/<\d{1,3}:\d{2}(?:[.:]\d{1,3})?>/g, " ")
+        .replace(/\s{2,}/g, " ")
         .trim();
       for (const rawTime of timestamps) {
-        timedEntries.push({ rawTime, text });
+        timedEntries.push({ rawTime, text, rawBody });
       }
     } else {
       untimedLines.push(trimmed);
@@ -113,19 +203,30 @@ export function parseLrc(raw: string): ParsedLyrics {
 
   if (timedEntries.length > 0) {
     const offsetSeconds = (metadata.offsetMs ?? 0) / 1000;
-    const lines = timedEntries
-      .map((entry) => ({
-        time: Math.max(0, Math.round((entry.rawTime - offsetSeconds) * 1000) / 1000),
-        text: entry.text,
-      }))
+    const sortedEntries = timedEntries
+      .map((entry) => {
+        const time = Math.max(0, Math.round((entry.rawTime - offsetSeconds) * 1000) / 1000);
+        const words = parseEnhancedLrcWords(entry.rawBody, time, offsetSeconds);
+        return { time, text: entry.text, words };
+      })
       .sort((a, b) => a.time - b.time);
+
+    const lines: LyricLine[] = sortedEntries.map(({ time, text }) => ({ time, text }));
+    const hasWordTimings = sortedEntries.some((entry) => Boolean(entry.words?.length));
+    const wordTimings = hasWordTimings ? sortedEntries.map((entry) => entry.words) : undefined;
 
     const plainText = lines
       .map((line) => line.text)
       .filter((line) => line.length > 0)
       .join("\n");
 
-    return { synced: true, lines, plainText, metadata };
+    return {
+      synced: true,
+      lines,
+      ...(wordTimings ? { wordTimings } : {}),
+      plainText,
+      metadata,
+    };
   }
 
   // Collapse leading/trailing empty lines while keeping stanza breaks.
@@ -182,6 +283,90 @@ export function findActiveLyricIndex(
     }
   }
   return result;
+}
+
+/**
+ * Computes per-word highlight state & fractional fill progress `[0..1]` for
+ * a synced lyric line. Uses explicit Enhanced LRC word cues when present, or
+ * smooth duration-weighted progressive word sweep across the active line window.
+ */
+export function computeWordHighlightStates(options: {
+  lineText: string;
+  explicitWords?: ReadonlyArray<LyricWord>;
+  lineStartTime: number;
+  nextLineTime?: number;
+  currentTime: number;
+  offsetSeconds?: number;
+  isLinePast?: boolean;
+  isLineUpcoming?: boolean;
+}): WordHighlightState[] {
+  const offset = options.offsetSeconds ?? 0;
+  const targetTime = options.currentTime + offset;
+
+  if (options.explicitWords && options.explicitWords.length > 0) {
+    return options.explicitWords.map((word, index, arr) => {
+      if (options.isLinePast) return { text: word.text, progress: 1, state: "past" };
+      if (options.isLineUpcoming) return { text: word.text, progress: 0, state: "upcoming" };
+
+      const start = word.time;
+      const fallbackEnd =
+        arr[index + 1]?.time ??
+        (options.nextLineTime !== undefined && options.nextLineTime > start
+          ? Math.min(options.nextLineTime, start + 1.2)
+          : start + 0.45);
+      const end = Math.max(start + 0.08, word.endTime ?? fallbackEnd);
+
+      if (targetTime >= end) {
+        return { text: word.text, progress: 1, state: "past" };
+      }
+      if (targetTime < start) {
+        return { text: word.text, progress: 0, state: "upcoming" };
+      }
+      const progress = Math.max(0, Math.min(1, (targetTime - start) / (end - start)));
+      return { text: word.text, progress, state: "active" };
+    });
+  }
+
+  const tokens = options.lineText.trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return [];
+
+  if (options.isLinePast) {
+    return tokens.map((text) => ({ text, progress: 1, state: "past" }));
+  }
+  if (options.isLineUpcoming) {
+    return tokens.map((text) => ({ text, progress: 0, state: "upcoming" }));
+  }
+
+  const rawSpan =
+    options.nextLineTime !== undefined && options.nextLineTime > options.lineStartTime
+      ? options.nextLineTime - options.lineStartTime
+      : Math.max(1.8, tokens.length * 0.42);
+  // Leave a tiny breathing buffer at the end of long instrumental gaps
+  const activeWindow = Math.max(0.9, Math.min(rawSpan * 0.92, Math.max(2.4, tokens.length * 0.58)));
+
+  const weights = tokens.map((word) => {
+    const cleanLen = Math.max(2, word.replace(/[^a-zA-Z0-9]/g, "").length || word.length);
+    const pauseBoost = /[,.;:!?]$/.test(word) ? 1.5 : 0;
+    return cleanLen + pauseBoost;
+  });
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0) || tokens.length;
+
+  let cursor = options.lineStartTime;
+  return tokens.map((text, idx) => {
+    const slotDuration = (weights[idx] / totalWeight) * activeWindow;
+    const start = cursor;
+    const end = cursor + Math.max(0.08, slotDuration);
+    cursor = end;
+
+    if (targetTime >= end) {
+      return { text, progress: 1, state: "past" };
+    }
+    if (targetTime < start) {
+      return { text, progress: 0, state: "upcoming" };
+    }
+    const progress = Math.max(0, Math.min(1, (targetTime - start) / (end - start)));
+    return { text, progress, state: "active" };
+  });
 }
 
 /* -------------------------------------------------------------------------- */

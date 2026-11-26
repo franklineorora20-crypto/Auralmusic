@@ -1,5 +1,5 @@
 import type { Track } from "../types/music";
-import { parseLrc, type LyricLine, type LyricsMetadata } from "../lib/lyrics";
+import { parseLrc, type LyricLine, type LyricWord, type LyricsMetadata } from "../lib/lyrics";
 
 export type LyricsSource = "lrclib" | "metadata" | "lrc-import" | "none";
 
@@ -9,6 +9,7 @@ export type TrackLyrics = {
   synced: boolean;
   instrumental: boolean;
   lines: LyricLine[];
+  wordTimings?: Array<LyricWord[] | undefined>;
   plainText: string;
   metadata?: LyricsMetadata;
   fetchedAt: number;
@@ -156,6 +157,7 @@ export function saveCustomLyrics(trackId: string, rawLrc: string): TrackLyrics {
     synced: parsed.synced,
     instrumental: false,
     lines: parsed.lines,
+    ...(parsed.wordTimings ? { wordTimings: parsed.wordTimings } : {}),
     plainText: parsed.plainText,
     metadata: parsed.metadata,
     fetchedAt: Date.now(),
@@ -209,6 +211,7 @@ function buildTrackLyricsFromRecord(trackId: string, record: LrclibRecord, sourc
       synced: parsed.synced,
       instrumental: false,
       lines: parsed.lines,
+      ...(parsed.wordTimings ? { wordTimings: parsed.wordTimings } : {}),
       plainText: parsed.plainText || record.plainLyrics?.trim() || "",
       metadata: parsed.metadata,
       fetchedAt: Date.now(),
@@ -222,6 +225,7 @@ function buildTrackLyricsFromRecord(trackId: string, record: LrclibRecord, sourc
       synced: parsed.synced,
       instrumental: false,
       lines: parsed.lines,
+      ...(parsed.wordTimings ? { wordTimings: parsed.wordTimings } : {}),
       plainText: parsed.plainText || record.plainLyrics.trim(),
       metadata: parsed.metadata,
       fetchedAt: Date.now(),
@@ -387,6 +391,7 @@ export async function getLyricsForTrack(
       synced: parsed.synced,
       instrumental: false,
       lines: parsed.lines,
+      ...(parsed.wordTimings ? { wordTimings: parsed.wordTimings } : {}),
       plainText: parsed.plainText,
       metadata: parsed.metadata,
       fetchedAt: Date.now(),

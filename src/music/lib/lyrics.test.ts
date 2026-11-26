@@ -181,3 +181,42 @@ test("cleanTrackTitle and selectBestLrclibCandidate prioritize synced accurate m
 
   assert.equal(chosen?.id, 2);
 });
+
+import { computeWordHighlightStates } from "./lyrics";
+
+test("parseLrc captures Enhanced LRC word timings and computeWordHighlightStates tracks exact and estimated cues", () => {
+  const enhanced = "[00:10.00]Hello <00:10.50>world <00:11.00>today <00:11.80>";
+  const parsed = parseLrc(enhanced);
+  assert.equal(parsed.synced, true);
+  assert.deepEqual(parsed.lines, [{ time: 10, text: "Hello world today" }]);
+  assert.ok(parsed.wordTimings?.[0]);
+  assert.equal(parsed.wordTimings[0].length, 3);
+  assert.deepEqual(parsed.wordTimings[0].map((w) => [w.text, w.time]), [
+    ["Hello", 10],
+    ["world", 10.5],
+    ["today", 11],
+  ]);
+
+  const atMidWorld = computeWordHighlightStates({
+    lineText: parsed.lines[0].text,
+    explicitWords: parsed.wordTimings[0],
+    lineStartTime: 10,
+    nextLineTime: 14,
+    currentTime: 10.75,
+  });
+  assert.equal(atMidWorld[0].state, "past");
+  assert.equal(atMidWorld[1].state, "active");
+  assert.ok(Math.abs(atMidWorld[1].progress - 0.5) < 0.01);
+  assert.equal(atMidWorld[2].state, "upcoming");
+
+  // Standard line-synced lyrics without inline word tags use smooth cadence sweep
+  const estimated = computeWordHighlightStates({
+    lineText: "Moonlight over quiet waves",
+    lineStartTime: 20,
+    nextLineTime: 24,
+    currentTime: 21.8,
+  });
+  assert.equal(estimated.length, 4);
+  assert.ok(estimated.some((w) => w.state === "past"));
+  assert.ok(estimated.some((w) => w.state === "active" || w.state === "past"));
+});

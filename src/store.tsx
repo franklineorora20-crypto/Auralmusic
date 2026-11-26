@@ -16,7 +16,9 @@ import {
   removeOfflineTrack,
   saveOfflineTrack,
   updateOfflineTrackArtwork,
+  updateOfflineTrackMetadata,
 } from "./offline";
+import { dedupeTrackIds, sortPlaylistTrackIds, type PlaylistSortKey } from "./music/lib/libraryManagement";
 import { fetchTrackAudio } from "./music/services/downloadService";
 import { sampleTracks } from "./music/providers/sample";
 import { setLocalTracks } from "./music/providers";
@@ -219,6 +221,9 @@ type Store = {
   shiftPlaylistTrack: (playlistId: string, trackId: string, direction: -1 | 1) => void;
   reorderPlaylistTrack: (playlistId: string, trackId: string, direction: -1 | 1) => void;
   movePlaylistTrack: (playlistId: string, fromIndex: number, toIndex: number) => void;
+  dedupePlaylist: (playlistId: string) => number;
+  sortPlaylist: (playlistId: string, sortBy: PlaylistSortKey) => void;
+  duplicatePlaylist: (playlistId: string) => Playlist | null;
   addRecent: (id: string) => void;
   downloadTrack: (id: string) => Promise<boolean>;
   cancelDownload: (id: string) => void;
@@ -247,9 +252,11 @@ type Store = {
     targetFolderId?: string | null;
   }) => Promise<Track>;
   updateTrackArtwork: (id: string, artwork: string) => Promise<void>;
+  updateTrackMetadata: (id: string, patch: { title: string; artist: string; album: string; genre: string }) => Promise<void>;
   requestTrackArtwork: (id: string, options?: { forceRefresh?: boolean }) => Promise<void>;
   reportBrokenArtwork: (id: string, brokenUrl: string) => void;
   removeLocalTrack: (id: string) => Promise<void>;
+  removeLocalTracks: (ids: string[]) => Promise<void>;
   volume: number;
   shuffle: boolean;
   repeat: RepeatMode;
@@ -654,6 +661,45 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return { ...playlist, trackIds, updatedAt: Date.now() };
     }));
   }, []);
+
+  const dedupePlaylist = useCallback((playlistId: string): number => {
+    let removedCount = 0;
+    setPlaylists((previous) =>
+      previous.map((playlist) => {
+        if (playlist.id !== playlistId) return playlist;
+        const nextIds = dedupeTrackIds(playlist.trackIds);
+        removedCount = playlist.trackIds.length - nextIds.length;
+        if (removedCount === 0) return playlist;
+        return { ...playlist, trackIds: nextIds, updatedAt: Date.now() };
+      }),
+    );
+    return removedCount;
+  }, []);
+
+  const sortPlaylist = useCallback((playlistId: string, sortBy: PlaylistSortKey) => {
+    setPlaylists((previous) =>
+      previous.map((playlist) => {
+        if (playlist.id !== playlistId) return playlist;
+        const sortedIds = sortPlaylistTrackIds(playlist.trackIds, (id) => trackIndex.get(id), sortBy);
+        return { ...playlist, trackIds: sortedIds, updatedAt: Date.now() };
+      }),
+    );
+  }, [trackIndex]);
+
+  const duplicatePlaylist = useCallback((playlistId: string): Playlist | null => {
+    const source = playlists.find((p) => p.id === playlistId);
+    if (!source) return null;
+    const copy: Playlist = {
+      id: `pl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      name: `${source.name} (Copy)`,
+      description: source.description,
+      trackIds: [...source.trackIds],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    setPlaylists((previous) => [...previous, copy]);
+    return copy;
+  }, [playlists]);
 
   const addRecent = useCallback((id: string) => {
     setRecentIds((previous) => [id, ...previous.filter((item) => item !== id)].slice(0, RECENT_LIMIT));
@@ -1095,12 +1141,47 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const updateTrackMetadata = useCallback(async (id: string, patch: { title: string; artist: string; album: string; genre: string }) => {
+    const applyPatch = (track: Track): Track => {
+      if (track.id !== id) return track;
+      return {
+        ...track,
+        ...(patch.title.trim() ? { title: patch.title.trim() } : {}),
+        ...(patch.artist.trim() ? { artist: patch.artist.trim() } : {}),
+        ...(patch.album.trim() ? { album: patch.album.trim() } : {}),
+        ...(patch.genre.trim() ? { genre: patch.genre.trim() } : {}),
+      };
+    };
+    setOfflineTracks((previous) => previous.map(applyPatch));
+    setDownloads((previous) => previous.map(applyPatch));
+    setCatalogueTracks((previous) => previous.map(applyPatch));
+    try {
+      await updateOfflineTrackMetadata(id, patch);
+    } catch (error: unknown) {
+      setStorageError(messageFrom(error, "Could not update track metadata."));
+    }
+  }, []);
+
   const removeLocalTrack = useCallback(async (id: string) => {
     await removeOfflineTrack(id);
     setFolders((previous) =>
       previous.map((folder) =>
         folder.trackIds.includes(id)
           ? { ...folder, trackIds: folder.trackIds.filter((item) => item !== id), updatedAt: Date.now() }
+          : folder,
+      ),
+    );
+    await refreshDownloads();
+  }, [refreshDownloads]);
+
+  const removeLocalTracks = useCallback(async (ids: string[]) => {
+    if (!ids.length) return;
+    const idSet = new Set(ids);
+    await Promise.all(ids.map((id) => removeOfflineTrack(id).catch(() => undefined)));
+    setFolders((previous) =>
+      previous.map((folder) =>
+        folder.trackIds.some((item) => idSet.has(item))
+          ? { ...folder, trackIds: folder.trackIds.filter((item) => !idSet.has(item)), updatedAt: Date.now() }
           : folder,
       ),
     );
@@ -1148,6 +1229,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     shiftPlaylistTrack: reorderPlaylistTrack,
     reorderPlaylistTrack,
     movePlaylistTrack,
+    dedupePlaylist,
+    sortPlaylist,
+    duplicatePlaylist,
     addRecent,
     downloadTrack,
     cancelDownload,
@@ -1155,9 +1239,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     importAudio,
     importAuthorizedMedia,
     updateTrackArtwork,
+    updateTrackMetadata,
     requestTrackArtwork,
     reportBrokenArtwork,
     removeLocalTrack,
+    removeLocalTracks,
     volume,
     shuffle,
     repeat,
@@ -1175,8 +1261,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     addTrackToFolder, removeTrackFromFolder, moveTrackToFolder,
     togglePlaylistLike, toggleSavedAlbum, toggleFollowedArtist,
     addToPlaylist, addTracksToPlaylist, removeFromPlaylist, reorderPlaylistTrack, movePlaylistTrack,
+    dedupePlaylist, sortPlaylist, duplicatePlaylist,
     addRecent, downloadTrack, cancelDownload, removeDownload, importAudio, importAuthorizedMedia, updateTrackArtwork,
-    requestTrackArtwork, reportBrokenArtwork, removeLocalTrack,
+    updateTrackMetadata, requestTrackArtwork, reportBrokenArtwork, removeLocalTrack, removeLocalTracks,
     volume, shuffle, repeat, queueIds, setVolume, setShuffle, setRepeat, setQueue, addCatalogueTracks,
   ]);
 

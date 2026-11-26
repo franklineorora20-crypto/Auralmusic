@@ -1,7 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { FileText, Minus, Plus, RefreshCw, RotateCcw, Upload, X } from "lucide-react";
 import type { Track } from "../types";
-import { findActiveLyricIndex, formatLrcTimestamp, formatLyricCueTime } from "../music/lib/lyrics";
+import {
+  computeWordHighlightStates,
+  findActiveLyricIndex,
+  formatLrcTimestamp,
+  formatLyricCueTime,
+} from "../music/lib/lyrics";
 import {
   clearCustomLyrics,
   getLyricsForTrack,
@@ -13,13 +18,15 @@ import {
 type LyricsPanelProps = {
   track: Track;
   currentTime: number;
+  isPlaying?: boolean;
+  playbackRate?: number;
   onSeek: (timeSeconds: number) => void;
   onClose?: () => void;
   variant: "drawer" | "expanded";
 };
 
-function sourceLabel(source: LyricsSource, synced: boolean): string {
-  const mode = synced ? "Synced" : "Unsynced";
+function sourceLabel(source: LyricsSource, synced: boolean, hasWordTimings: boolean): string {
+  const mode = synced ? (hasWordTimings ? "Word-synced" : "Synced") : "Unsynced";
   if (source === "lrclib") return `LRCLIB · ${mode}`;
   if (source === "metadata") return `Embedded metadata · ${mode}`;
   if (source === "lrc-import") return `Imported LRC · ${mode}`;
@@ -29,6 +36,8 @@ function sourceLabel(source: LyricsSource, synced: boolean): string {
 export default function LyricsPanel({
   track,
   currentTime,
+  isPlaying = false,
+  playbackRate = 1,
   onSeek,
   onClose,
   variant,
@@ -42,10 +51,12 @@ export default function LyricsPanel({
   const [editorOpen, setEditorOpen] = useState(false);
   const [draftLrc, setDraftLrc] = useState("");
   const [editorError, setEditorError] = useState("");
+  const [smoothTime, setSmoothTime] = useState(currentTime);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const lrcInputRef = useRef<HTMLInputElement>(null);
+  const anchorRef = useRef({ time: currentTime, stamp: typeof performance !== "undefined" ? performance.now() : 0 });
 
   useEffect(() => {
     setSyncOffset(0);
@@ -53,6 +64,31 @@ export default function LyricsPanel({
     setEditorOpen(false);
     setEditorError("");
   }, [track.id]);
+
+  useEffect(() => {
+    anchorRef.current = {
+      time: currentTime,
+      stamp: typeof performance !== "undefined" ? performance.now() : 0,
+    };
+    setSmoothTime(currentTime);
+  }, [currentTime, track.id]);
+
+  useEffect(() => {
+    if (!isPlaying || !lyrics?.synced) return;
+    const prefersReducedMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReducedMotion) return;
+
+    let rafId = 0;
+    const tick = (now: number) => {
+      const elapsedSec = Math.max(0, (now - anchorRef.current.stamp) / 1000) * playbackRate;
+      setSmoothTime(anchorRef.current.time + Math.min(elapsedSec, 0.45));
+      rafId = window.requestAnimationFrame(tick);
+    };
+    rafId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [isPlaying, lyrics?.synced, playbackRate]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -80,10 +116,12 @@ export default function LyricsPanel({
     return () => controller.abort();
   }, [track.id, track.lyrics, reloadToken]);
 
+  const activeTime = isPlaying ? smoothTime : currentTime;
+
   const activeIndex = useMemo(() => {
     if (!lyrics?.synced || !lyrics.lines.length) return -1;
-    return findActiveLyricIndex(lyrics.lines, currentTime, syncOffset);
-  }, [lyrics, currentTime, syncOffset]);
+    return findActiveLyricIndex(lyrics.lines, activeTime, syncOffset);
+  }, [lyrics, activeTime, syncOffset]);
 
   useEffect(() => {
     if (!autoFollow || activeIndex < 0) return;
@@ -153,7 +191,14 @@ export default function LyricsPanel({
     if (lyrics?.synced && lyrics.lines.length) {
       setDraftLrc(
         lyrics.lines
-          .map((line) => `${formatLrcTimestamp(line.time)}${line.text ? ` ${line.text}` : ""}`)
+          .map((line, index) => {
+            const explicit = lyrics.wordTimings?.[index];
+            if (explicit?.length) {
+              const body = explicit.map((w) => `<${formatLrcTimestamp(w.time).slice(1, -1)}>${w.text}`).join(" ");
+              return `${formatLrcTimestamp(line.time)}${body}`;
+            }
+            return `${formatLrcTimestamp(line.time)}${line.text ? ` ${line.text}` : ""}`;
+          })
           .join("\n"),
       );
     } else if (lyrics?.plainText) {
@@ -165,7 +210,8 @@ export default function LyricsPanel({
     setEditorOpen(true);
   };
 
-  const headerMeta = lyrics && lyrics.source !== "none" ? sourceLabel(lyrics.source, lyrics.synced) : "";
+  const hasWordTimings = Boolean(lyrics?.wordTimings?.some((w) => w && w.length > 0));
+  const headerMeta = lyrics && lyrics.source !== "none" ? sourceLabel(lyrics.source, lyrics.synced, hasWordTimings) : "";
 
   return (
     <section
@@ -267,8 +313,8 @@ export default function LyricsPanel({
       {editorOpen ? (
         <div className="lyrics-editor">
           <p className="lyrics-editor-hint">
-            Load an <code>.lrc</code> file or paste timestamped lines (for example{" "}
-            <code>[00:12.40]First line</code>).
+            Load an <code>.lrc</code> file or paste standard / word-timed Enhanced LRC (e.g.{" "}
+            <code>[00:12.40]&lt;00:12.40&gt;First &lt;00:12.90&gt;word</code>).
           </p>
           <input
             ref={lrcInputRef}
@@ -282,7 +328,7 @@ export default function LyricsPanel({
             className="lyrics-textarea"
             value={draftLrc}
             onChange={(event) => setDraftLrc(event.target.value)}
-            placeholder={"[00:08.50]Paste LRC timestamps or plain lyrics here\n[00:14.20]Click any line to seek playback"}
+            placeholder={"[00:08.50]Paste LRC timestamps or plain lyrics here\n[00:14.20]<00:14.20>Word <00:14.80>level <00:15.30>highlights"}
             rows={8}
             aria-label="Lyrics text input"
           />
@@ -357,6 +403,20 @@ export default function LyricsPanel({
               {lyrics.lines.map((line, index) => {
                 const isActive = index === activeIndex;
                 const isPast = activeIndex >= 0 && index < activeIndex;
+                const wordStates =
+                  isActive && line.text
+                    ? computeWordHighlightStates({
+                        lineText: line.text,
+                        explicitWords: lyrics.wordTimings?.[index],
+                        lineStartTime: line.time,
+                        nextLineTime: lyrics.lines[index + 1]?.time,
+                        currentTime: activeTime,
+                        offsetSeconds: syncOffset,
+                        isLinePast: isPast,
+                        isLineUpcoming: !isActive && !isPast,
+                      })
+                    : null;
+
                 return (
                   <li key={`${line.time}-${index}`} className="lyrics-list-item">
                     <button
@@ -372,7 +432,25 @@ export default function LyricsPanel({
                       }}
                     >
                       <span className="lyric-cue">{formatLyricCueTime(line.time)}</span>
-                      <span className="lyric-text">{line.text || "• • •"}</span>
+                      <span className="lyric-text">
+                        {wordStates && wordStates.length > 0 ? (
+                          wordStates.map((word, wIdx) => (
+                            <Fragment key={`${wIdx}-${word.text}`}>
+                              <span
+                                className={`lyric-word is-${word.state}`}
+                                style={{
+                                  "--word-progress": `${Math.round(word.progress * 100)}%`,
+                                } as React.CSSProperties}
+                              >
+                                {word.text}
+                              </span>
+                              {wIdx < wordStates.length - 1 ? " " : ""}
+                            </Fragment>
+                          ))
+                        ) : (
+                          line.text || "• • •"
+                        )}
+                      </span>
                     </button>
                   </li>
                 );

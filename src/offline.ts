@@ -185,6 +185,42 @@ export async function updateOfflineTrackArtwork(
   });
 }
 
+export async function updateOfflineTrackMetadata(
+  id: string,
+  patch: { title?: string; artist?: string; album?: string; genre?: string },
+): Promise<Track | null> {
+  const db = await openDatabase();
+  return new Promise<Track | null>((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const getReq = store.get(id);
+    let updatedTrack: Track | null = null;
+
+    getReq.onsuccess = () => {
+      const existing = getReq.result as OfflineRecord | undefined;
+      if (!existing) {
+        resolve(null);
+        return;
+      }
+      updatedTrack = {
+        ...existing.track,
+        ...(patch.title !== undefined && patch.title.trim() ? { title: patch.title.trim() } : {}),
+        ...(patch.artist !== undefined && patch.artist.trim() ? { artist: patch.artist.trim() } : {}),
+        ...(patch.album !== undefined && patch.album.trim() ? { album: patch.album.trim() } : {}),
+        ...(patch.genre !== undefined && patch.genre.trim() ? { genre: patch.genre.trim() } : {}),
+      };
+      store.put({
+        ...existing,
+        track: updatedTrack,
+      });
+    };
+    getReq.onerror = () => reject(getReq.error ?? new Error("Could not read offline track."));
+    transaction.oncomplete = () => resolve(updatedTrack);
+    transaction.onerror = () => reject(transaction.error ?? new Error("Could not update track metadata."));
+    transaction.onabort = () => reject(transaction.error ?? new Error("Updating track metadata was interrupted."));
+  });
+}
+
 export async function removeOfflineTrack(id: string): Promise<void> {
   const db = await openDatabase();
   await new Promise<void>((resolve, reject) => {

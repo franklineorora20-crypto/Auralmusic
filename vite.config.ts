@@ -1,9 +1,35 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
+function disableHmrWebSocketPlugin(): Plugin {
+  let hmrDisabled = false;
+  return {
+    name: "aural-disable-hmr-websocket",
+    apply: "serve",
+    configResolved(config) {
+      hmrDisabled = config.server.hmr === false || config.server.ws === false;
+    },
+    transform(code, id) {
+      if (!hmrDisabled) return null;
+      const cleanId = id.split("?")[0];
+      if (/[/\\]vite[/\\]dist[/\\]client[/\\]client\.mjs$/.test(cleanId) && code.includes("transport.connect(")) {
+        return {
+          code: code.replace(
+            "transport.connect(createHMRHandler(handleMessage));",
+            "/* HMR WebSocket disabled */",
+          ),
+          map: null,
+        };
+      }
+      return null;
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
+    disableHmrWebSocketPlugin(),
     react(),
     VitePWA({
       registerType: "autoUpdate",
@@ -93,5 +119,7 @@ export default defineConfig({
     host: "0.0.0.0",
     port: 3000,
     allowedHosts: true,
+    hmr: false,
+    ws: false,
   },
 });
