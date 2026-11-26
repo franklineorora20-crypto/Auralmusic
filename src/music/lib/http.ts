@@ -68,6 +68,7 @@ const limiters: Record<ProviderId, ProviderRateLimiter> = {
   jamendo: new ProviderRateLimiter(3),
   local: new ProviderRateLimiter(50),
   sample: new ProviderRateLimiter(50),
+  ytdlp: new ProviderRateLimiter(10),
 };
 
 export class ProviderError extends Error {

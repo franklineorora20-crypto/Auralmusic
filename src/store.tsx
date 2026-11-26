@@ -224,6 +224,20 @@ type Store = {
   cancelDownload: (id: string) => void;
   removeDownload: (id: string) => Promise<void>;
   importAudio: (files: File[], targetFolderId?: string | null) => Promise<{ imported: number; skipped: number }>;
+  importAuthorizedMedia: (params: {
+    blob: Blob;
+    filename: string;
+    metadata: {
+      title: string;
+      artist: string;
+      album?: string;
+      duration?: number;
+      thumbnail?: string;
+      sourceUrl?: string;
+      extractor?: string;
+    };
+    targetFolderId?: string | null;
+  }) => Promise<Track>;
   updateTrackArtwork: (id: string, artwork: string) => Promise<void>;
   requestTrackArtwork: (id: string, options?: { forceRefresh?: boolean }) => Promise<void>;
   reportBrokenArtwork: (id: string, brokenUrl: string) => void;
@@ -828,6 +842,104 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return { imported, skipped };
   }, [refreshDownloads]);
 
+  const importAuthorizedMedia = useCallback(async (params: {
+    blob: Blob;
+    filename: string;
+    metadata: {
+      title: string;
+      artist: string;
+      album?: string;
+      duration?: number;
+      thumbnail?: string;
+      sourceUrl?: string;
+      extractor?: string;
+    };
+    targetFolderId?: string | null;
+  }): Promise<Track> => {
+    const file = new File([params.blob], params.filename, {
+      type: params.blob.type || "audio/mpeg",
+    });
+    const headerBytes = new Uint8Array(await file.slice(0, Math.min(file.size, 6 * 1024 * 1024)).arrayBuffer());
+    let embedded = extractEmbeddedMediaFromAudioBytes(headerBytes);
+    if (!embedded && /\.(m4a|mp4|aac)$/i.test(file.name) && file.size > headerBytes.length && file.size <= 32 * 1024 * 1024) {
+      const fullBytes = new Uint8Array(await file.arrayBuffer());
+      embedded = extractEmbeddedMediaFromAudioBytes(fullBytes);
+    }
+    const embeddedArtwork = embedded?.artwork
+      ? imageBytesToDataUrl(embedded.artwork.data, embedded.artwork.mime)
+      : "";
+    const fallbackThumb = params.metadata.thumbnail && isDisplayableImageUrl(params.metadata.thumbnail)
+      ? params.metadata.thumbnail
+      : "";
+    const artwork = embeddedArtwork || fallbackThumb;
+    const artworkMeta: ArtworkMetadata | undefined = embeddedArtwork
+      ? {
+          source: "embedded",
+          attribution: "Embedded in audio file",
+          confidence: 100,
+          matchType: "embedded",
+          verifiedAt: Date.now(),
+        }
+      : fallbackThumb
+        ? {
+            source: "user",
+            attribution: params.metadata.extractor ? `${params.metadata.extractor} artwork` : "Source artwork",
+            confidence: 80,
+            matchType: "track",
+            sourceUrl: fallbackThumb,
+            verifiedAt: Date.now(),
+          }
+        : undefined;
+    const lyrics = embedded?.syncedLyrics || embedded?.plainLyrics
+      ? {
+          ...(embedded.syncedLyrics ? { syncedLyrics: embedded.syncedLyrics } : {}),
+          ...(embedded.plainLyrics ? { plainLyrics: embedded.plainLyrics } : {}),
+        }
+      : undefined;
+
+    const id = `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const track: Track = {
+      id,
+      providerId: "local",
+      providerName: PROVIDER_NAMES.local,
+      providerTrackId: id,
+      title: embedded?.title || params.metadata.title || parseFileName(file.name).title,
+      artist: embedded?.artist || params.metadata.artist || "Local library",
+      album: embedded?.album || params.metadata.album || "Imported",
+      artwork,
+      artworkSmall: artwork,
+      ...(artworkMeta ? { artworkMeta } : {}),
+      duration: Math.max(0, params.metadata.duration ?? 0),
+      streamUrl: URL.createObjectURL(file),
+      genre: "Imported",
+      tags: params.metadata.extractor ? [params.metadata.extractor.toLowerCase()] : [],
+      licensing: {
+        name: "Authorized user media import",
+        ...(params.metadata.sourceUrl ? { url: params.metadata.sourceUrl } : {}),
+        attribution: "Imported via yt-dlp with user rights confirmation",
+        streamingAllowed: true,
+        downloadAllowed: true,
+        note: "Authorized import — stored offline in this browser.",
+      },
+      ...(params.metadata.sourceUrl ? { permalink: params.metadata.sourceUrl } : {}),
+      accent: PROVIDER_ACCENTS.local,
+      imported: true,
+      ...(lyrics ? { lyrics } : {}),
+    };
+
+    await saveOfflineTrack(track, file);
+    if (params.targetFolderId) {
+      setFolders((previous) =>
+        previous.map((folder) => {
+          if (folder.id !== params.targetFolderId || folder.trackIds.includes(id)) return folder;
+          return { ...folder, trackIds: [...folder.trackIds, id], updatedAt: Date.now() };
+        }),
+      );
+    }
+    await refreshDownloads();
+    return track;
+  }, [refreshDownloads]);
+
   const applyResolvedArtwork = useCallback((id: string, resolution: ArtworkResolution, force = false) => {
     const applyToTrack = (track: Track): Track => {
       if (track.id !== id) return track;
@@ -1023,6 +1135,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     cancelDownload,
     removeDownload,
     importAudio,
+    importAuthorizedMedia,
     updateTrackArtwork,
     requestTrackArtwork,
     reportBrokenArtwork,
@@ -1044,7 +1157,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     addTrackToFolder, removeTrackFromFolder, moveTrackToFolder,
     togglePlaylistLike, toggleSavedAlbum, toggleFollowedArtist,
     addToPlaylist, addTracksToPlaylist, removeFromPlaylist, reorderPlaylistTrack, movePlaylistTrack,
-    addRecent, downloadTrack, cancelDownload, removeDownload, importAudio, updateTrackArtwork,
+    addRecent, downloadTrack, cancelDownload, removeDownload, importAudio, importAuthorizedMedia, updateTrackArtwork,
     requestTrackArtwork, reportBrokenArtwork, removeLocalTrack,
     volume, shuffle, repeat, queueIds, setVolume, setShuffle, setRepeat, setQueue, addCatalogueTracks,
   ]);

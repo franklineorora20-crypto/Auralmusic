@@ -93,5 +93,13 @@ export function getProviderStatuses(): ProviderStatus[] {
       requiresKey: false,
       docsUrl: PROVIDER_DOCS.local,
     },
+    {
+      id: "ytdlp",
+      name: PROVIDER_NAMES.ytdlp,
+      ready: true,
+      requiresKey: false,
+      reason: "Optional URL metadata lookup and rights-confirmed local import via the local yt-dlp backend.",
+      docsUrl: PROVIDER_DOCS.ytdlp,
+    },
   ];
 }

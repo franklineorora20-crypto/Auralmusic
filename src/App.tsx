@@ -4,7 +4,7 @@ import Ferrofluid from "./components/Ferrofluid";
 import { getCrtPreset } from "./components/crtPresets";
 import {
   ArrowLeft, ArrowLeftRight, ArrowRight, ChevronDown, ChevronUp, Download, HardDrive,
-  Heart, Home, ImagePlus, Infinity as InfinityIcon, Library, ListMusic, MicVocal, Pause, Play, Plus,
+  Heart, Home, ImagePlus, Infinity as InfinityIcon, Library, Link2, ListMusic, MicVocal, Pause, Play, Plus,
   Repeat1, Repeat2, Search, Shuffle, SkipBack, SkipForward, Trash2, Upload, Volume2,
   UserRound, VolumeX, Wifi, WifiOff, X, PanelLeftClose, PanelLeftOpen, ChevronsUp, Clock, Radio,
 } from "lucide-react";
@@ -15,6 +15,7 @@ import { CrumpledAppScreen, PaperTossOverlay, playPaperRustle, type PaperTossIte
 import { DevicePermissionsCard } from "./components/DevicePermissionsCard";
 import { OfflineIndicator, PWAInstallButton } from "./components/PWAInstallButton";
 import { PlaylistArtwork, TrackArtwork } from "./components/TrackArtwork";
+import YtdlpImportPanel from "./components/YtdlpImportPanel";
 import {
   backgroundAudioBridge,
   ensurePlaybackAudioSession,
@@ -59,6 +60,7 @@ function AuralApp() {
   const [selectedId, setSelectedId] = useState("");
   const [query, setQuery] = useState("");
   const [searchFilter, setSearchFilter] = useState("All");
+  const [searchProvider, setSearchProvider] = useState<"all" | "audius" | "jamendo" | "local" | "ytdlp">("all");
   const [searchTracks, setSearchTracks] = useState<Track[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState("");
@@ -423,7 +425,7 @@ function AuralApp() {
 
   useEffect(() => {
     const term = query.trim();
-    if (view !== "search" || !term) {
+    if (view !== "search" || !term || searchProvider === "ytdlp" || searchProvider === "local") {
       setSearchTracks([]);
       setSearchError("");
       setSearchLoading(false);
@@ -463,7 +465,7 @@ function AuralApp() {
       loadMoreController.current?.abort();
       loadMoreController.current = null;
     };
-  }, [query, view]);
+  }, [query, view, searchProvider]);
 
   const loadMoreSearchResults = () => {
     const term = query.trim();
@@ -1250,70 +1252,112 @@ function AuralApp() {
 
   const renderSearchView = () => (
     <div className="page search-page page-enter" key="search">
-      <div className="search-hero">
-        <label className="search-box">
-          <Search size={20} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="What do you want to listen to?" aria-label="Search music" />
-          {query && <button onClick={() => setQuery("")} aria-label="Clear search"><X size={16} /></button>}
-        </label>
+      {searchProvider !== "ytdlp" && (
+        <div className="search-hero">
+          <label className="search-box">
+            <Search size={20} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="What do you want to listen to?" aria-label="Search music" />
+            {query && <button onClick={() => setQuery("")} aria-label="Clear search"><X size={16} /></button>}
+          </label>
+        </div>
+      )}
+      <div className="source-selector-row" role="group" aria-label="Music sources">
+        <span className="source-selector-label">Source</span>
+        <div className="filter-row source-filter-row">
+          {(
+            [
+              { id: "all", label: "All sources" },
+              { id: "audius", label: "Audius" },
+              { id: "jamendo", label: "Jamendo" },
+              { id: "local", label: "Local library" },
+              { id: "ytdlp", label: "yt-dlp" },
+            ] as const
+          ).map((source) => (
+            <button
+              key={source.id}
+              type="button"
+              className={searchProvider === source.id ? "active" : ""}
+              onClick={() => setSearchProvider(source.id)}
+              aria-pressed={searchProvider === source.id}
+            >
+              {source.label}
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="filter-row" role="group" aria-label="Search filters">
-        {["All", "Songs", "Artists", "Albums", "Playlists", "Genres"].map((filter) => (
-          <button key={filter} className={searchFilter === filter ? "active" : ""} onClick={() => setSearchFilter(filter)}>{filter}</button>
-        ))}
-      </div>
-      {query ? (
-        <section className="search-results">
-                    <div className="section-heading"><h2>{searchFilter === "Playlists" ? "Your playlists" : "Catalogue results"}</h2><small>{searchFilter === "Playlists" ? store.playlists.filter((playlist) => playlist.name.toLowerCase().includes(query.toLowerCase())).length : searchTracks.length} results</small></div>
-          {searchLoading && <p className="catalogue-status" role="status">Searching Audius and Jamendo…</p>}
 
-          {searchError && <p className="catalogue-error" role="alert">{searchError}</p>}
-          {searchFilter === "Playlists"
-            ? store.playlists.filter((playlist) => playlist.name.toLowerCase().includes(query.toLowerCase())).map((playlist) => (
-              <button className="search-playlist-result" key={playlist.id} onClick={() => navigate("playlist", playlist.id)}><ListMusic size={19} /><strong>{playlist.name}</strong><small>{playlist.trackIds.length} tracks · Your playlist</small></button>
-            ))
-            : (() => {
-              const displayedSearchTracks = searchTracks
-                .map((track) => store.getTrack(track.id) ?? track)
-                .filter((track) => {
-                  const term = query.trim().toLowerCase();
-                  if (searchFilter === "Artists") return track.artist.toLowerCase().includes(term);
-                  if (searchFilter === "Albums") return track.album.toLowerCase().includes(term);
-                  if (searchFilter === "Genres") return track.genre.toLowerCase().includes(term);
-                  return true;
-                });
-              return displayedSearchTracks.map((track, index) => renderTrackRow({ track, index, collection: displayedSearchTracks }));
-            })()}
-                    {!searchLoading && !searchError && !searchTracks.length && searchFilter !== "Playlists" && <p className="catalogue-status">No matches for this search.</p>}
-
-          {searchHasMore && <button className="secondary-button load-more" onClick={loadMoreSearchResults} disabled={searchLoading}>Load more</button>}
-          {searchFilter !== "Playlists" && filteredTracks.some((track) => track.providerId === "sample" || track.providerId === "local") && (() => {
-            const localMatches = filteredTracks.filter((track) => track.providerId === "sample" || track.providerId === "local");
-            return (
-              <section className="content-section">
-                <div className="section-heading"><h2>Your library &amp; sample previews</h2><small>Not Audius catalogue results</small></div>
-                {localMatches.map((track, index) => renderTrackRow({ track, index, collection: localMatches }))}
-              </section>
-            );
-          })()}
-        </section>
+      {searchProvider === "ytdlp" ? (
+        <YtdlpImportPanel
+          onPlayTrack={(track) => playTrack(track)}
+          onOpenLibrary={() => navigate("library")}
+        />
       ) : (
-        <section className="content-section">
-          <div className="section-heading"><h2>Browse categories</h2></div>
-          {searchHistory.length > 0 && <div className="search-history"><span>Recent searches</span>{searchHistory.map((term) => <button key={term} onClick={() => setQuery(term)}>{term}</button>)}</div>}
-          <div className="category-grid">
-            {["Electronic", "Ambient", "Indie", "Soul", "Pop", "Alternative"].map((category, index) => (
-              <button
-                key={category}
-                style={{ "--cat-color": ["#8a633b", "#2d5241", "#8b4e3c", "#7a313c", "#2f4562", "#5c6142"][index] } as React.CSSProperties}
-                onClick={() => { setQuery(category); setSearchFilter(category === "Focus" || category === "Chill" ? "All" : "Genres"); }}
-              >
-                <strong>{category}</strong>
-                <span>Explore genre</span>
-              </button>
+        <>
+          <div className="filter-row" role="group" aria-label="Search filters">
+            {["All", "Songs", "Artists", "Albums", "Playlists", "Genres"].map((filter) => (
+              <button key={filter} className={searchFilter === filter ? "active" : ""} onClick={() => setSearchFilter(filter)}>{filter}</button>
             ))}
           </div>
-        </section>
+          {query ? (
+            <section className="search-results">
+              {searchProvider !== "local" && (
+                <>
+                  <div className="section-heading"><h2>{searchFilter === "Playlists" ? "Your playlists" : "Catalogue results"}</h2><small>{searchFilter === "Playlists" ? store.playlists.filter((playlist) => playlist.name.toLowerCase().includes(query.toLowerCase())).length : searchTracks.filter((t) => searchProvider === "all" || t.providerId === searchProvider).length} results</small></div>
+                  {searchLoading && <p className="catalogue-status" role="status">Searching Audius and Jamendo…</p>}
+                  {searchError && <p className="catalogue-error" role="alert">{searchError}</p>}
+                  {searchFilter === "Playlists"
+                    ? store.playlists.filter((playlist) => playlist.name.toLowerCase().includes(query.toLowerCase())).map((playlist) => (
+                      <button className="search-playlist-result" key={playlist.id} onClick={() => navigate("playlist", playlist.id)}><ListMusic size={19} /><strong>{playlist.name}</strong><small>{playlist.trackIds.length} tracks · Your playlist</small></button>
+                    ))
+                    : (() => {
+                      const displayedSearchTracks = searchTracks
+                        .map((track) => store.getTrack(track.id) ?? track)
+                        .filter((track) => {
+                          if (searchProvider !== "all" && track.providerId !== searchProvider) return false;
+                          const term = query.trim().toLowerCase();
+                          if (searchFilter === "Artists") return track.artist.toLowerCase().includes(term);
+                          if (searchFilter === "Albums") return track.album.toLowerCase().includes(term);
+                          if (searchFilter === "Genres") return track.genre.toLowerCase().includes(term);
+                          return true;
+                        });
+                      return displayedSearchTracks.map((track, index) => renderTrackRow({ track, index, collection: displayedSearchTracks }));
+                    })()}
+                  {!searchLoading && !searchError && !searchTracks.filter((t) => searchProvider === "all" || t.providerId === searchProvider).length && searchFilter !== "Playlists" && <p className="catalogue-status">No matches for this search.</p>}
+                  {searchHasMore && <button className="secondary-button load-more" onClick={loadMoreSearchResults} disabled={searchLoading}>Load more</button>}
+                </>
+              )}
+              {(searchProvider === "all" || searchProvider === "local") && searchFilter !== "Playlists" && filteredTracks.some((track) => track.providerId === "sample" || track.providerId === "local") && (() => {
+                const localMatches = filteredTracks.filter((track) =>
+                  searchProvider === "local" ? track.providerId === "local" : track.providerId === "sample" || track.providerId === "local",
+                );
+                if (!localMatches.length) return null;
+                return (
+                  <section className="content-section">
+                    <div className="section-heading"><h2>{searchProvider === "local" ? "Your local library" : "Your library & sample previews"}</h2><small>Stored locally</small></div>
+                    {localMatches.map((track, index) => renderTrackRow({ track, index, collection: localMatches }))}
+                  </section>
+                );
+              })()}
+            </section>
+          ) : (
+            <section className="content-section">
+              <div className="section-heading"><h2>Browse categories</h2></div>
+              {searchHistory.length > 0 && <div className="search-history"><span>Recent searches</span>{searchHistory.map((term) => <button key={term} onClick={() => setQuery(term)}>{term}</button>)}</div>}
+              <div className="category-grid">
+                {["Electronic", "Ambient", "Indie", "Soul", "Pop", "Alternative"].map((category, index) => (
+                  <button
+                    key={category}
+                    style={{ "--cat-color": ["#8a633b", "#2d5241", "#8b4e3c", "#7a313c", "#2f4562", "#5c6142"][index] } as React.CSSProperties}
+                    onClick={() => { setQuery(category); setSearchFilter(category === "Focus" || category === "Chill" ? "All" : "Genres"); }}
+                  >
+                    <strong>{category}</strong>
+                    <span>Explore genre</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+        </>
       )}
     </div>
   );
@@ -1324,6 +1368,7 @@ function AuralApp() {
         <div><p className="eyebrow">Collection</p><h1>Library</h1></div>
         <div className="library-actions">
           <button onClick={() => triggerImportPicker(null)}><Upload size={16} /> Import audio</button>
+          <button onClick={() => { setSearchProvider("ytdlp"); navigate("search"); }}><Link2 size={16} /> Import URL</button>
           <button onClick={() => setCreateOpen(true)}><Plus size={16} /> New playlist</button>
         </div>
       </div>
@@ -1418,6 +1463,7 @@ function AuralApp() {
             <button onClick={() => startShuffle(store.downloads)}><Shuffle size={16} /> Shuffle</button>
           )}
           <button onClick={() => triggerImportPicker(null)}><Upload size={16} /> Import audio</button>
+          <button onClick={() => { setSearchProvider("ytdlp"); navigate("search"); }}><Link2 size={16} /> Import URL</button>
           <div className={`connection-status ${online ? "online" : "offline"}`} role="status">
             {online ? <Wifi size={16} /> : <WifiOff size={16} />}{online ? "Online" : "Offline"}
           </div>

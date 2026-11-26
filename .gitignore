@@ -15,3 +15,9 @@ vite.config.d.ts
 dev.log
 *.log
 .continue/
+dist-server/
+release/
+bin/
+resources/bin/*.exe
+resources/bin/yt-dlp
+resources/bin/ffmpeg

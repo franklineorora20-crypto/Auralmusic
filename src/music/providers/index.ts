@@ -4,9 +4,10 @@ import type { MusicProvider } from "./base";
 import { jamendoProvider } from "./jamendo";
 import { localProvider, setLocalTracks } from "./local";
 import { sampleProvider } from "./sample";
+import { ytdlpProvider } from "./ytdlp";
 
 /** Every provider the app knows about, in default query order. */
-export const PROVIDERS: MusicProvider[] = [audiusProvider, jamendoProvider, localProvider, sampleProvider];
+export const PROVIDERS: MusicProvider[] = [audiusProvider, jamendoProvider, localProvider, sampleProvider, ytdlpProvider];
 
 export const NETWORK_PROVIDERS: MusicProvider[] = [audiusProvider, jamendoProvider];
 

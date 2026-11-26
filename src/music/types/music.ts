@@ -6,7 +6,7 @@
  * provider-specific response again.
  */
 
-export type ProviderId = "audius" | "jamendo" | "local" | "sample";
+export type ProviderId = "audius" | "jamendo" | "local" | "sample" | "ytdlp";
 
 export type TrackLicensing = {
   /** Human readable licence name, e.g. "Creative Commons BY-NC-SA 3.0". */
@@ -192,6 +192,7 @@ export const PROVIDER_NAMES: Record<ProviderId, string> = {
   jamendo: "Jamendo",
   local: "Local library",
   sample: "Sample preview",
+  ytdlp: "yt-dlp (Authorized)",
 };
 
 export const PROVIDER_ACCENTS: Record<ProviderId, string> = {
@@ -199,6 +200,7 @@ export const PROVIDER_ACCENTS: Record<ProviderId, string> = {
   jamendo: "#4d6480",
   local: "#c49e64",
   sample: "#8b6f4e",
+  ytdlp: "#a46f43",
 };
 
 export const PROVIDER_DOCS: Record<ProviderId, string> = {
@@ -206,4 +208,5 @@ export const PROVIDER_DOCS: Record<ProviderId, string> = {
   jamendo: "https://developer.jamendo.com/",
   local: "",
   sample: "",
+  ytdlp: "https://github.com/yt-dlp/yt-dlp",
 };

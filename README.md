@@ -41,3 +41,36 @@ The app stores playlists, favourites, recently played tracks, preferences and ca
 - A cancelled or interrupted download is not retained as a partial file and must be started again. Provider availability, CORS, network access, and each track's licensing determine whether streaming or downloading succeeds.
 
 This repository has no authentication or cloud backend. Library data is local to the browser profile and is not synchronized across devices. Audius playback and download availability are controlled by Audius and each uploader; a stream URL alone is never treated as download permission.
+
+## Optional yt-dlp media-import provider
+
+Aural includes an optional `yt-dlp` source in **Search -> Source -> yt-dlp** (and **Import URL** in Library/Downloads) backed by a local Express service (`server.ts` + `server/ytdlpService.ts`). The React renderer never executes shell commands or spawns processes directly.
+
+### Installation (local development)
+
+1. Install Node.js 20+ and Python 3.10+.
+2. Install [yt-dlp](https://github.com/yt-dlp/yt-dlp) and `ffmpeg`:
+   - Windows: `winget install yt-dlp.yt-dlp Gyan.FFmpeg` (or `pip install yt-dlp`, or place `yt-dlp.exe` and `ffmpeg.exe` in `resources/bin/` or set `YTDLP_PATH` / `FFMPEG_PATH`).
+   - Linux / macOS: `pip install yt-dlp` and install `ffmpeg` via your package manager.
+3. Run `npm install` and `npm run dev` (starts Express + Vite on `http://localhost:3000`).
+
+### Windows Electron packaging
+
+```powershell
+# Optional: download official yt-dlp.exe into resources/bin/
+node scripts/prepare-win-binaries.mjs
+# Place ffmpeg.exe in resources/bin/ for audio conversion (MP3/M4A/Opus)
+
+# Build frontend, backend server bundle, and Windows x64 Electron installer + zip
+npm run electron:build:win
+```
+
+Packaged Electron builds boot the local backend on `127.0.0.1` (`electron/main.cjs`) and automatically detect `yt-dlp.exe` and `ffmpeg.exe` inside `process.resourcesPath/bin` (`extraResources` from `resources/bin`).
+
+### Licensing & usage limitations
+
+- **Metadata vs. authorization**: Fetching metadata (`title`, `artist`/`uploader`, `duration`, `thumbnail`, `sourceUrl`) inspects public reference information only and **never grants permission** to stream or download copyrighted content.
+- **Rights confirmation**: Importing audio requires confirming that you own the rights or have explicit authorization from the rights holder.
+- **Third-party licenses**: `yt-dlp` is released under [The Unlicense](https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE); `ffmpeg` builds are licensed under LGPL v2.1+ / GPL v2+ depending on build configuration. Check binary redistribution obligations before distributing bundled `ffmpeg.exe` binaries.
+- **Security & limits**: Only `http://` and `https://` public URLs are accepted; local/private network addresses are blocked; subprocesses run without a shell using fixed flags (`--ignore-config`, `--no-exec`) and an 80 MB per-track offline storage limit.
+
